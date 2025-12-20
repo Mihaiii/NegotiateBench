@@ -2,20 +2,19 @@ import os
 import random
 from pathlib import Path
 
+from misc.loaders import get_current_code
+
 
 def load_agent_class(display_name: str):
     """
     Load the Agent class from a model's solution file.
     Returns the Agent class or None if not found/invalid.
     """
-    solutions_path = Path(__file__).parent.parent / "solutions" / f"{display_name}.py"
-    if not solutions_path.exists():
+    code = get_current_code(display_name)
+    if code is None:
         return None
 
     try:
-        with open(solutions_path, "r") as f:
-            code = f.read()
-
         namespace = {}
         exec(code, namespace)
 

@@ -1,13 +1,13 @@
 from db.service import get_top_model_latest_session
 from dotenv import load_dotenv
 import json
-import yaml
 from pathlib import Path
 from openai import OpenAI
 import os
 import re
 import misc.git as git
 from misc.battlefield import validate_code, generate_negotiation_data, run_battles
+from misc.loaders import load_models, load_prompts, get_current_code
 from db.service import save_battle_results, save_winner_samples
 
 # Load environment variables from .env file
@@ -18,31 +18,6 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
-
-
-def load_models():
-    """Load the models.yaml file and return the models list."""
-    config_path = Path(__file__).parent / "models.yaml"
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-    return config.get("models", [])
-
-
-def load_prompts():
-    """Load the prompts.yaml file and return the prompts."""
-    prompts_path = Path(__file__).parent / "misc" / "prompts.yaml"
-    with open(prompts_path, "r") as f:
-        prompts = yaml.safe_load(f)
-    return prompts
-
-
-def get_current_code(display_name: str) -> str | None:
-    """Get the current code for a model from the solutions folder."""
-    solutions_path = Path(__file__).parent / "solutions" / f"{display_name}.py"
-    if solutions_path.exists():
-        with open(solutions_path, "r") as f:
-            return f.read()
-    return None
 
 
 def build_user_prompt(

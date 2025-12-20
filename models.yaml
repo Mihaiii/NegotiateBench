@@ -1,0 +1,7 @@
+models:
+  - display_name: Olmo 3.1 32b think
+    openrouter_name: allenai/olmo-3.1-32b-think:free
+  - display_name: Mimo V2 Flash
+    openrouter_name: xiaomi/mimo-v2-flash:free
+  - display_name: AI Trinity Mini
+    openrouter_name: arcee-ai/trinity-mini:free

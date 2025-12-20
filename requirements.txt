@@ -1,0 +1,10 @@
+supabase==v2.27.0
+python-fasthtml==0.12.36
+python-dotenv
+psycopg2-binary
+GitPython
+PyYAML
+openai
+
+# Development dependencies
+pytest

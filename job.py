@@ -1,0 +1,232 @@
+from db.service import get_top_model_latest_session
+from dotenv import load_dotenv
+import json
+import yaml
+from pathlib import Path
+from openai import OpenAI
+import os
+import re
+import misc.git as git
+from misc.battlefield import validate_code, generate_negotiation_data, run_battles
+from db.service import save_battle_results, save_winner_samples
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Initialize OpenRouter client
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+)
+
+
+def load_models():
+    """Load the models.yaml file and return the models list."""
+    config_path = Path(__file__).parent / "models.yaml"
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+    return config.get("models", [])
+
+
+def load_prompts():
+    """Load the prompts.yaml file and return the prompts."""
+    prompts_path = Path(__file__).parent / "misc" / "prompts.yaml"
+    with open(prompts_path, "r") as f:
+        prompts = yaml.safe_load(f)
+    return prompts
+
+
+def get_current_code(display_name: str) -> str | None:
+    """Get the current code for a model from the solutions folder."""
+    solutions_path = Path(__file__).parent / "solutions" / f"{display_name}.py"
+    if solutions_path.exists():
+        with open(solutions_path, "r") as f:
+            return f.read()
+    return None
+
+
+def build_user_prompt(
+    prompts: dict, current_code: str | None = None, error: str | None = None
+) -> str:
+    """Build the user prompt, optionally including current code and error."""
+    user_prompt_template = prompts.get("user_prompt", "")
+
+    if current_code:
+        current_code_section_template = prompts.get("current_code_section", "")
+        current_code_section = current_code_section_template.format(
+            current_code=current_code
+        )
+    else:
+        current_code_section = ""
+
+    if error:
+        error_section_template = prompts.get("error_section", "")
+        error_section = error_section_template.format(error=error)
+    else:
+        error_section = ""
+
+    return user_prompt_template.format(
+        current_code_section=current_code_section, error_section=error_section
+    )
+
+
+def call_openrouter(model_name: str, system_prompt: str, user_prompt: str) -> str:
+    """Call OpenRouter API and return the response text."""
+    max_retries = 3
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            last_error = e
+            print(
+                f"OpenRouter API call failed (attempt {attempt + 1}/{max_retries}): {e}"
+            )
+
+    raise last_error
+
+
+def extract_python_code(response_text: str) -> str | None:
+    """Extract Python code from markdown code blocks."""
+    pattern = r"```python\s*(.*?)\s*```"
+    matches = re.findall(pattern, response_text, re.DOTALL)
+    if matches:
+        return matches[0].strip()
+    return None
+
+
+def save_solution(display_name: str, code: str) -> None:
+    """Save the validated code to the solutions folder."""
+    solutions_path = Path(__file__).parent / "solutions" / f"{display_name}.py"
+    with open(solutions_path, "w") as f:
+        f.write(code)
+    print(f"Saved solution to {solutions_path}")
+
+
+def main():
+    # Pull from origin and get current commit
+    # We need the commit hash in order to get the samples against the top performing model from the db.
+    commit_hash = git.pull()
+
+    # Load models from config
+    models: list[dict] = load_models()
+    print(f"Loaded models: {models}")
+
+    # Generate negotiation data
+    negotiation_data = generate_negotiation_data()
+    print(f"Generated {len(negotiation_data)} negotiation scenarios")
+    print(json.dumps(negotiation_data[:2], indent=2))  # Print first 2 for brevity
+
+    # Identify top model
+    top_model = get_top_model_latest_session()
+
+    # Load prompts
+    prompts = load_prompts()
+    system_prompt = prompts.get("system_prompt", "")
+
+    # Iterate through models and call OpenRouter
+    for model in models.copy():
+        # do not ask to regenerate code for the top model from the latest session
+        if model == top_model:
+            continue
+
+        display_name = model["display_name"]
+        openrouter_name = model["openrouter_name"]
+
+        print(f"\nProcessing model: {display_name}")
+
+        # Get existing code if any
+        current_code = get_current_code(display_name)
+
+        new_code = get_algos(
+            prompts, system_prompt, display_name, openrouter_name, current_code
+        )
+        if not new_code:
+            models.remove(model)
+            continue
+
+    try:
+        # Run battles between all models
+        print("\n" + "=" * 50)
+        print("Starting negotiation battles...")
+        print("=" * 50)
+
+        battle_results, battle_scenarios = run_battles(models, negotiation_data)
+
+        # Print results summary
+        print("\n" + "=" * 50)
+        print("Battle Results Summary:")
+        print("=" * 50)
+        for model_name, stats in battle_results.items():
+            sessions = stats["sessions"]
+            total_profit = stats["total_profit"]
+            avg_profit = total_profit / sessions if sessions > 0 else 0
+            print(
+                f"{model_name}: {sessions} sessions, total profit: {total_profit}, avg profit: {avg_profit:.2f}"
+            )
+
+        # Save results to database
+        save_battle_results(battle_results)
+
+        # Determine the winner (model with max total profit)
+        winner_name = max(
+            battle_results.keys(), key=lambda m: battle_results[m]["total_profit"]
+        )
+        print(f"\nWinner: {winner_name}")
+
+        new_commit_hash = git.push()
+        # Save battle scenarios
+        save_winner_samples(winner_name, battle_scenarios, new_commit_hash)
+
+    except Exception as e:
+        print(f"Failed to run battles or push changes: {e}")
+
+
+def get_algos(prompts, system_prompt, display_name, openrouter_name, current_code):
+    error = None
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        print(f"Attempt {attempt + 1}/{max_attempts}")
+
+        # Build user prompt with current code and error (if any)
+        user_prompt = build_user_prompt(prompts, current_code, error)
+
+        # Call OpenRouter
+        response_text = call_openrouter(openrouter_name, system_prompt, user_prompt)
+
+        # Extract Python code from response
+        extracted_code = extract_python_code(response_text)
+        if not extracted_code:
+            error = "No Python code block found in response"
+            current_code = None
+            print(f"Error: {error}")
+            continue
+
+            # Validate the code
+        is_valid, validation_error = validate_code(extracted_code)
+        if is_valid:
+            # Save the solution
+            save_solution(display_name, extracted_code)
+            print(f"Successfully validated and saved code for {display_name}")
+            return current_code
+        else:
+            error = validation_error
+            current_code = extracted_code
+            print(f"Validation error: {error}")
+    else:
+        print(
+            f"Failed to get valid code for {display_name} after {max_attempts} attempts"
+        )
+        return None
+
+
+if __name__ == "__main__":
+    main()

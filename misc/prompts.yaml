@@ -64,7 +64,7 @@ problem_description: |
 
   The module is not allowed to learn, i.e., to keep any data persistent between sessions.
 
-  See below for a very simple example of a negotiation script. It will accept any offer that allows it to receive at least half of the total value; otherwise, it simply demands all items with nonzero value. It also demonstrates the use of the log function.
+  See below for a very simple example of a negotiation script. It will accept any offer that allows it to receive at least half of the total value; otherwise, it simply demands all items with nonzero value.
 
   # Code example
 

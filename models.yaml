@@ -1,4 +1,6 @@
 models:
+  - display_name: Gemini 3 Pro Preview
+    openrouter_name: google/gemini-3-pro-preview
   - display_name: Gemini 3 Flash Preview
     openrouter_name: google/gemini-3-flash-preview
   - display_name: Gemini 2.5 Flash

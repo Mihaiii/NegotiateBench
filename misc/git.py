@@ -9,18 +9,38 @@ _repo_path = Path(__file__).parent.parent
 _repo = git.Repo(_repo_path)
 
 
+def _ensure_git_config():
+    """Ensure Git user email and name are configured."""
+    try:
+        email = _repo.config_reader().get_value("user", "email", None)
+        name = _repo.config_reader().get_value("user", "name", None)
+    except:
+        email = None
+        name = None
+    
+    if not email:
+        email = os.environ.get("GIT_USER_EMAIL", "auto-update@negotiatebench.local")
+        _repo.config_writer().set_value("user", "email", email).release()
+    
+    if not name:
+        name = os.environ.get("GIT_USER_NAME", "Auto Update Bot")
+        _repo.config_writer().set_value("user", "name", name).release()
+
+
+_ensure_git_config()
+
+
 def pull():
     """Pull from origin and return the current commit hash."""
-    # Pull from origin
+    _ensure_git_config()
     origin = _repo.remotes.origin
     origin.pull()
 
 
 def push():
-    # Stage all changes
+    _ensure_git_config()
     _repo.git.add(A=True)
 
-    # Commit with message
     _repo.index.commit("[Auto-update] Update LLM generated solutions")
 
     # Push to origin using PAT

@@ -20,7 +20,7 @@ All updates are automated, and the history of LLM-generated negotiation code is 
 
 [Here](https://github.com/hola/challenge_haggling/blob/master/blog/01-rules.md#haggling) is the original problem statement.
 
-Below you can find the problem statement as presented to the model to solve:
+Below you can find the problem statement as presented to the models to solve:
 
 > Let's say there are a book, two hats, and three balls. You and a partner have to decide how to split these objects between the two of you. To you, the book is worth $4, a ball $2, and the hats are worthless. The partner might value the same objects differently; you don't know their valuation, but you know that the total worth of all objects is the same as for you, in this case, $10.
 >
@@ -43,6 +43,7 @@ Below you can find the problem statement as presented to the model to solve:
 > A solution is a Python file with no dependencies. It must have an `Agent` class with a constructor and a single method:
 >
 > ```python
+>
 > class Agent:
 >     def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
 >         pass
@@ -51,6 +52,7 @@ Below you can find the problem statement as presented to the model to solve:
 >         pass
 >
 > ```
+>
 > An instance of this class is created once for a negotiation session. The constructor receives the following arguments:
 >
 > - me is 0 if your turn is first, and 1 if your turn is second.
@@ -71,6 +73,7 @@ Below you can find the problem statement as presented to the model to solve:
 > Code example
 >
 > ```python
+>
 > class Agent:
 > def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
 >     self.counts = counts
@@ -93,6 +96,7 @@ Below you can find the problem statement as presented to the model to solve:
 >         if self.values[i] == 0:
 >             o[i] = 0
 >     return o
+>
 > ```
 
 ## Credits / Thanks / Acknowledgments

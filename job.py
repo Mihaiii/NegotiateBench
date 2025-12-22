@@ -204,10 +204,9 @@ def get_algos(display_name, openrouter_name, current_code, samples):
     system_prompt_template = prompts.get("system_prompt", "")
     problem_description = prompts.get("problem_description", "")
     code_example = get_code_example()
+    problem_description = problem_description.format(code_example=code_example)
     system_prompt = system_prompt_template.format(
-        model_name=display_name,
-        problem_description=problem_description,
-        code_example=code_example,
+        model_name=display_name, problem_description=problem_description
     )
 
     error = None

@@ -239,7 +239,7 @@ def get_algos(display_name, openrouter_name, current_code, samples):
             # Save the solution
             save_solution(display_name, extracted_code)
             print(f"Successfully validated and saved code for {display_name}")
-            return current_code
+            return extracted_code
         else:
             error = validation_error
             current_code = extracted_code

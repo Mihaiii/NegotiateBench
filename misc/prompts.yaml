@@ -13,16 +13,16 @@ system_prompt: |
   
   When generating your code, make sure to:
   - Follow best coding practices.
-  - Make it as succint as possible while maintaining readability.
+  - Make it as succinct as possible while maintaining readability.
   - Ensure it can handle edge cases.
   - IMPORTANT: DO NOT use any external libraries that are not part of the Python standard library.
-  - IMPORTANT: Your code must define a class named `Agent` with an `__init__` method and a `make_offer` method as specified in the negotiation framework. Note that both the argument and the return value of offer describe the partition from your perspective, that is, what you get.
+  - IMPORTANT: Your code must define a class named `Agent` with an `__init__` method and a `make_offer` method as specified in the negotiation framework. Note that both the argument and the return value of `offer` describe the partition from your perspective—that is, what you get.
 
 
 problem_description: |
   Let's say there are a book, two hats, and three balls. You and a partner have to decide how to split these objects between the two of you. To you, the book is worth $4, a ball $2, and the hats are worthless. The partner might value the same objects differently; you don't know their valuation, but you know that the total worth of all objects is the same as for you, in this case, $10.
 
-  You and the partner take turns making offers to each other about how to split the goods. On each turn, one can either accept the partner's offer (except on the very first turn), or make a counter-offer. The negotiations are limited to 15 rounds (that is, there can be up to 30 offers in total). If an agreement is reached, each of you receives the amount that their part of the goods is worth to them. If there is still no agreement after the last turn (that is, the last word is a counter-offer rather than acceptance), neither partner receives anything at all. The same happens if one of the partners walks away from the negotiations.
+  You and your partner take turns making offers to each other about how to split the goods. On each turn, you can either accept the partner's offer (except on the very first turn) or make a counter-offer. Negotiations are limited to 15 rounds (up to 30 offers in total). If an agreement is reached, each of you receives the value of your share according to your own valuation. If there is no agreement after the last turn (i.e., the last word is a counter-offer rather than acceptance), neither partner receives anything. The same happens if either partner walks away from the negotiations.
 
   Here is how the negotiations might go:
 
@@ -30,15 +30,15 @@ problem_description: |
   - Other: I don't accept. I want all the balls and a hat; you get the book and a hat.
   - You: I don't accept. I want the book and a ball; you get two balls and both hats.
   - Other: I accept.
-  Unknown to you, the partner's valuation was: $2 for a ball, $2 for a hat, nothing for a book. Your agreement brought $6 to you and $8 to your partner.
+  Unknown to you, the partner's valuation was: $2 for a ball, $2 for a hat, and nothing for a book. Your agreement brought $6 to you and $8 to your partner.
 
-  In general, there are two or more types of objects, and a positive number of objects of each type. Each type of object is worth some nonnegative integer to each partner. The total value of all objects for each of the partners is the same, although the particular valuations are, in general, different between the partners. A proposed split must distribute all objects between partners; individual objects cannot be partitioned.
+  In general, there are two or more types of objects, and a positive number of objects of each type. Each type of object is worth some nonnegative integer to each partner. The total value of all objects for each partner is the same, although the particular valuations are generally different. A proposed split must distribute all objects between partners; individual objects cannot be divided.
 
-  Your goal is to write a script that tries to maximize the value of its deal.
+  Your goal is to write a script that tries to maximize the value of your deal.
 
   # Solutions
 
-  A solution is a Python file with no dependencies. It must have an Agent class with a constructor and a single method:
+  A solution is a Python file with no dependencies. It must have an `Agent` class with a constructor and a single method:
 
   ```python
   class Agent:
@@ -56,15 +56,15 @@ problem_description: |
   - values is a list of integers the same length as counts, describing how much every object is worth to you.
   - max_rounds is the limit on the number of rounds in the negotiations; a round is two turns, one by each partner.
 
-  The offer method is called each time when it's your turn. Its argument o is a list of integers the same size as counts, which describes how many of each type of object the partner offers to you. If your turn is first, and this is the first round, o is None.
+  The `offer` method is called each time it's your turn. Its argument `o` is a list of integers the same size as `counts`, describing how many of each type of object the partner offers to you. If your turn is first and this is the first round, `o` is None.
 
-  The offer method should return None if you accept the offer (except when o is None). Otherwise, it should be a list of integers the same size as counts, describing how many of each type of object you want for yourself. Note that both the argument and the return value of offer describe the partition from your perspective, that is, what you get.
+  The `offer` method should return None if you accept the offer (except when `o` is None). Otherwise, it should return a list of integers the same size as `counts`, describing how many of each type of object you want for yourself. Note that both the argument and the return value of `offer` describe the partition from your perspective—that is, what you get.
 
-  There is a timeout of 5 second per turn. If the code times out, throws an exception or returns an invalid value, it is regarded as walking away from the negotiations, and neither partner receives anything.
+  There is a timeout of 5 seconds per turn. If the code times out, throws an exception, or returns an invalid value, it is regarded as walking away from the negotiations, and neither partner receives anything.
 
-  The module won't be allowed to learn, i.e. to keep any data persistent between sessions.
+  The module is not allowed to learn, i.e., to keep any data persistent between sessions.
 
-  See the below example for a very simple example of a negotiation script. It will accept any offer that allows it to receive at least half of the total value; otherwise, it simply demands all items with nonzero value. It also demonstrates the use of the log function.
+  See below for a very simple example of a negotiation script. It will accept any offer that allows it to receive at least half of the total value; otherwise, it simply demands all items with nonzero value. It also demonstrates the use of the log function.
 
   # Code example
 
@@ -95,6 +95,6 @@ error_section: |
 
 samples: |
   # Negotiations examples
-  Here are some examples of previous negotiation rounds against a top performing model.
-  You don't know the source code of the top performing negotiation partner, but you do know how they value the objects during the previous negotiation sessions (something that will change is not known to you during the future actual negotiation).
+  Here are some examples of previous negotiation rounds against a top-performing model.
+  You don't know the source code of the top-performing negotiation partner, but you do know how they valued the objects during previous negotiation sessions (something that may change and is not known to you for future negotiations).
   {samples_data}

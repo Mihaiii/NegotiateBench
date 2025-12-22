@@ -190,18 +190,17 @@ def main():
         print(f"\nWinner: {winner_name}")
 
         # Flatten all scenario dicts from battle_scenarios dict and filter for winner
-        filtered_scenarios = []
+        winner_scenarios = []
         for scenario_list in battle_scenarios.values():
             for scenario_dict in scenario_list:
                 scenario = scenario_dict.get("scenario", {})
                 # Check for winner in either player's values
                 player_keys = [k for k in scenario.keys() if k.endswith("_values")]
                 if any(winner_name in k for k in player_keys):
-                    filtered_scenarios.append(scenario_dict)
-        battle_scenarios = filtered_scenarios
+                    winner_scenarios.append(scenario_dict)
 
-        # Save battle scenarios
-        save_battle_samples(battle_scenarios, new_commit_hash)
+        # Save only the winner's scenarios
+        save_battle_samples(winner_scenarios, new_commit_hash)
 
     except Exception as e:
         print(f"Failed to run battles, push changes or save battle samples: {e}")

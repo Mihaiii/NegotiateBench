@@ -133,14 +133,13 @@ def save_battle_results(results: dict, max_possible_profit: int, commit_hash: st
         conn.close()
 
 
-def save_battle_samples(battle_scenarios: dict, commit_hash: str):
+def save_battle_samples(battle_scenarios: list, commit_hash: str):
     """
     Save all battle scenarios to the database.
 
     Args:
-        battle_scenarios: Dictionary mapping (model_X, model_Y) tuple to list of scenario data.
-            Each scenario contains:
-            - 'scenario': the original scenario data
+        battle_scenarios: List of scenario dictionaries. Each scenario contains:
+            - 'scenario': the original scenario data with '{model_name}_values' keys
             - 'outcome': 'deal', 'no_deal', or error type
             - '{model_x}_profit': profit achieved by model_x
             - '{model_y}_profit': profit achieved by model_y
@@ -152,21 +151,25 @@ def save_battle_samples(battle_scenarios: dict, commit_hash: str):
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL environment variable must be set")
 
-    # Collect all records to insert
     records = []
-    for (model_x, model_y), scenarios in battle_scenarios.items():
-        for scenario_info in scenarios:
-            # Build the data to save - include all relevant info
-            data = {
-                "scenario": scenario_info["scenario"],
-                "outcome": scenario_info["outcome"],
-                f"{model_x}_profit": scenario_info[f"{model_x}_profit"],
-                f"{model_y}_profit": scenario_info[f"{model_y}_profit"],
-                "turn_history": scenario_info["turn_history"],
-            }
-            data_json = json.dumps(data)
+    for scenario_info in battle_scenarios:
+        profit_keys = [k for k in scenario_info.keys() if k.endswith("_profit")]
+        if len(profit_keys) != 2:
+            continue
+        
+        model_x = profit_keys[0].replace("_profit", "")
+        model_y = profit_keys[1].replace("_profit", "")
+        
+        data = {
+            "scenario": scenario_info["scenario"],
+            "outcome": scenario_info["outcome"],
+            f"{model_x}_profit": scenario_info[f"{model_x}_profit"],
+            f"{model_y}_profit": scenario_info[f"{model_y}_profit"],
+            "turn_history": scenario_info["turn_history"],
+        }
+        data_json = json.dumps(data)
 
-            records.append((model_x, model_y, data_json, commit_hash))
+        records.append((model_x, model_y, data_json, commit_hash))
 
     if not records:
         print("No battle scenarios to save")

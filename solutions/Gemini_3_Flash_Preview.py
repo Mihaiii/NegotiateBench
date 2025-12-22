@@ -4,61 +4,53 @@ class Agent:
         self.counts = counts
         self.values = values
         self.max_rounds = max_rounds
-        self.current_round = 0
+        self.turn_count = 0
         self.total_value = sum(c * v for c, v in zip(counts, values))
         
-        # Sort items by value density (value to us)
-        self.items_by_value = sorted(
-            range(len(counts)), 
-            key=lambda i: self.values[i], 
-            reverse=True
-        )
+        # Priority list based on value per item
+        self.priority = sorted(range(len(counts)), key=lambda i: self.values[i], reverse=True)
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        if self.me == 1: # Increment round count if we are second mover
-            self.current_round += 1
-            
-        # 1. Evaluate partner's offer
+        self.turn_count += 1
+        
+        # Total turns allowed is max_rounds * 2. 
+        # But turn_count increments every time THIS agent is called.
+        # Max calls to this method is max_rounds.
+        
         if o is not None:
             offer_value = sum(v * count for v, count in zip(self.values, o))
             
-            # Acceptance Logic:
-            # - Accept if it's the last round and we get > 0
-            # - Accept if value is "good enough" based on time remaining
-            threshold = self.total_value * self._get_threshold_ratio()
+            # Acceptance logic
+            if self.turn_count >= self.max_rounds:
+                # Absolute last chance for this agent
+                return None if offer_value > 0 else self._make_offer(0.5)
+            
+            threshold = self._get_threshold()
             if offer_value >= threshold:
                 return None
-            if self.current_round >= self.max_rounds - 1 and offer_value > 0:
-                return None
 
-        # 2. Increment round count if we are first mover
-        if self.me == 0:
-            self.current_round += 1
+        return self._make_offer(self._get_threshold())
 
-        # 3. Create a counter-offer
-        return self._create_offer()
-
-    def _get_threshold_ratio(self) -> float:
-        """Determines how much we are willing to concede based on time."""
-        progress = self.current_round / self.max_rounds
+    def _get_threshold(self) -> float:
+        """Determines the minimum acceptable value based on progress."""
+        progress = self.turn_count / self.max_rounds
         if progress < 0.2:
-            return 0.9  # Ask for a lot early
+            return self.total_value * 0.95
         if progress < 0.5:
-            return 0.8
+            return self.total_value * 0.85
         if progress < 0.8:
-            return 0.7
-        return 0.61  # Final stages: accept more than half
+            return self.total_value * 0.75
+        if progress < 0.95:
+            return self.total_value * 0.6
+        return self.total_value * 0.51
 
-    def _create_offer(self) -> list[int]:
-        """Greedily pick items to satisfy target value, prioritizing what we value."""
-        target_ratio = self._get_threshold_ratio() + 0.1 # Try to get more than our limit
-        target_value = self.total_value * min(0.95, target_ratio)
-        
+    def _make_offer(self, target_value: float) -> list[int]:
+        """Constructs an offer greedily prioritizing internal value."""
         my_offer = [0] * len(self.counts)
         current_val = 0
         
-        # Priority 1: Take items that are worth something to us
-        for i in self.items_by_value:
+        # Always try to keep items we value until we hit target
+        for i in self.priority:
             if self.values[i] > 0:
                 for _ in range(self.counts[i]):
                     if current_val < target_value:
@@ -67,20 +59,19 @@ class Agent:
                     else:
                         break
         
-        # Priority 2: In early game, don't give away items that are worthless to us 
-        # but might be valuable to them (prevents appearing too desperate).
-        # In late game, give away worthless items to sweeten the deal.
-        if self.current_round < self.max_rounds * 0.7:
-            for i in range(len(self.counts)):
-                if self.values[i] == 0:
-                    my_offer[i] = self.counts[i] // 2 
-        else:
-            for i in range(len(self.counts)):
-                if self.values[i] == 0:
+        # Strategy for worthless items:
+        # Early on, hold them to signal they might be valuable (bargaining chips).
+        # Late game, give them all to the partner to "sweeten" their perceived deal.
+        progress = self.turn_count / self.max_rounds
+        for i in range(len(self.counts)):
+            if self.values[i] == 0:
+                if progress < 0.5:
+                    my_offer[i] = self.counts[i] // 2
+                else:
                     my_offer[i] = 0
-
-        # Ensure we don't return an empty offer if we want something
-        if sum(my_offer) == 0 and self.total_value > 0:
-            my_offer[self.items_by_value[0]] = 1
+        
+        # Ensure we always ask for at least something if there is value to be had
+        if current_val == 0 and self.total_value > 0:
+            my_offer[self.priority[0]] = 1
             
         return my_offer

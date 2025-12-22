@@ -11,14 +11,24 @@ class Agent:
 
         if o is not None:
             partner_value = sum(value * count for value, count in zip(self.values, o))
-            # Accept the offer if it provides at least half of the total value
+            # Accept the offer if the partner's value is at least half of the total value
             if partner_value >= self.total_value / 2:
                 return None
 
-        # Propose to take all items with positive value that I can
-        proposed_offer = self.counts.copy()
-        for i in range(len(proposed_offer)):
-            if self.values[i] == 0:
-                proposed_offer[i] = 0
+        # Create a proposed offer
+        proposed_offer = [0] * len(self.counts)
+
+        # Distribute objects based on their value to prioritize higher valued goods
+        remaining_value_needed = self.total_value / 2  # Aim for at least half of total value
+
+        for i in range(len(self.counts)):
+            # Allocate as many high-value items as possible within the limits
+            if self.values[i] > 0:
+                proposed_offer[i] = min(self.counts[i], remaining_value_needed // self.values[i])
+                remaining_value_needed -= proposed_offer[i] * self.values[i]
+
+            # If we meet our target value, stop allocating further
+            if remaining_value_needed <= 0:
+                break
 
         return proposed_offer

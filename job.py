@@ -1,14 +1,18 @@
 from db.service import get_top_model_latest_session
 from dotenv import load_dotenv
 import json
-from pathlib import Path
 from openai import OpenAI
 import os
 import re
 import misc.git as git
 from misc.battlefield import validate_code, generate_negotiation_data, run_battles
-from misc.loaders import load_models, load_prompts, get_current_code, get_code_example
-from misc.utils import sanitize
+from misc.io import (
+    load_models,
+    load_prompts,
+    get_current_code,
+    get_code_example,
+    save_solution,
+)
 from db.service import save_battle_results, save_battle_samples, get_samples
 
 # Load environment variables from .env file
@@ -90,18 +94,6 @@ def extract_python_code(response_text: str) -> str | None:
     if matches:
         return matches[0].strip()
     return None
-
-
-def save_solution(display_name: str, code: str) -> None:
-    """Save the validated code to the solutions folder."""
-
-    sanitized_display_name = sanitize(display_name)
-    solutions_path = (
-        Path(__file__).parent / "solutions" / f"{sanitized_display_name}.py"
-    )
-    with open(solutions_path, "w") as f:
-        f.write(code)
-    print(f"Saved solution to {solutions_path}")
 
 
 def main():

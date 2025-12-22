@@ -37,3 +37,15 @@ def get_code_example() -> str:
     example_path = Path(__file__).parent.parent / "solutions" / "example.py"
     with open(example_path, "r") as f:
         return f.read()
+
+
+def save_solution(display_name: str, code: str) -> None:
+    """Save the validated code to the solutions folder."""
+
+    sanitized_display_name = sanitize(display_name)
+    solutions_path = (
+        Path(__file__).parent / "solutions" / f"{sanitized_display_name}.py"
+    )
+    with open(solutions_path, "w") as f:
+        f.write(code)
+    print(f"Saved solution to {solutions_path}")

@@ -184,12 +184,12 @@ def run_negotiation(agent_0, agent_1, counts, max_rounds, name_0: str, name_1: s
     - agent_0_items: list of items agent_0 gets (or None if no deal)
     - agent_1_items: list of items agent_1 gets (or None if no deal)
     - outcome: 'deal', 'no_deal', or 'error'
-    - turn_history: list of dicts with 'round', '{name_0}_offer', '{name_1}_offer' for each round
+    - turn_history: list of dicts with 'round', '{name_0} offer', '{name_1} offer' for each round
     """
     offer = None  # First offer starts as None
     turn_history = []
-    offer_key_0 = f"{name_0}_offer"
-    offer_key_1 = f"{name_1}_offer"
+    offer_key_0 = f"{name_0} offer"
+    offer_key_1 = f"{name_1} offer"
 
     for round_num in range(max_rounds):
         round_record = {
@@ -282,7 +282,7 @@ def run_battles(
             - 'outcome': 'deal', 'no_deal', or error type
             - '{model_x}_profit': profit achieved by model_x
             - '{model_y}_profit': profit achieved by model_y
-            - 'turn_history': list of offers per round with '{model_name}_offer' keys
+            - 'turn_history': list of offers per round with '{model_name} offer' keys
     """
     # Get num_samples from environment variable if available
     try:

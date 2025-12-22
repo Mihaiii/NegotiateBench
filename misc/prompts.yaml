@@ -16,7 +16,7 @@ system_prompt: |
   - Make it as succinct as possible while maintaining readability.
   - Ensure it can handle edge cases.
   - IMPORTANT: DO NOT use any external libraries that are not part of the Python standard library.
-  - IMPORTANT: Your code must define a class named `Agent` with an `__init__` method and a `make_offer` method as specified in the negotiation framework. Note that both the argument and the return value of `offer` describe the partition from your perspective—that is, what you get.
+  - IMPORTANT: Your code must define a class named `Agent` with an `__init__` method and a `offer` method as specified in the negotiation framework. Note that both the argument and the return value of `offer` describe the partition from your perspective—that is, what you get.
 
 
 problem_description: |

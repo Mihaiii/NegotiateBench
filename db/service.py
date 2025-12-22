@@ -144,7 +144,7 @@ def save_battle_samples(battle_scenarios: dict, commit_hash: str):
             - 'outcome': 'deal', 'no_deal', or error type
             - '{model_x}_profit': profit achieved by model_x
             - '{model_y}_profit': profit achieved by model_y
-            - 'turn_history': list of offers per round with '{model_name}_offer' keys
+            - 'turn_history': list of offers per round with '{model_name} offer' keys
         commit_hash: The git commit hash
     """
     import json

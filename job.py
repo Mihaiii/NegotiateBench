@@ -188,6 +188,13 @@ def main():
             battle_results.keys(), key=lambda m: battle_results[m]["total_profit"]
         )
         print(f"\nWinner: {winner_name}")
+
+        # Filter battle_scenarios to only include scenarios where one of the players is the winner
+        battle_scenarios = [
+            scenario for scenario in battle_scenarios
+            if scenario.get("player1") == winner_name or scenario.get("player2") == winner_name
+        ]
+
         # Save battle scenarios
         save_battle_samples(battle_scenarios, new_commit_hash)
 

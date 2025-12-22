@@ -1,3 +1,4 @@
+#!/bin/bash
 
 cd NegotiateBench
 python runner.py &

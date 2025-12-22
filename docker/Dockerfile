@@ -1,6 +1,6 @@
 FROM python:3-slim
 
-RUN apt-get update && apt-get install -y git
+RUN apt-get update && apt-get install -y git gcc build-essential
 
 COPY script.sh .
 

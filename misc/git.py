@@ -40,6 +40,8 @@ def push():
     )
     origin.set_url(auth_url)
     try:
+        # Pull with rebase first to avoid "failed to push some refs" errors
+        origin.pull(rebase=True)
         origin.push()
     finally:
         # Restore original URL to avoid storing token in git config

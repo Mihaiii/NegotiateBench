@@ -16,16 +16,17 @@ class TestGenerateNegotiationData:
         """Test that default MAX_NUM_DATA generates up to 20 scenarios."""
         monkeypatch.delenv("MAX_NUM_DATA", raising=False)
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         assert len(data) <= 20
         assert len(data) > 0
+        assert total_target_worth > 0
 
     def test_max_num_data_1(self, monkeypatch):
         """Test with MAX_NUM_DATA=1."""
         monkeypatch.setenv("MAX_NUM_DATA", "1")
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         assert len(data) <= 1
 
@@ -33,7 +34,7 @@ class TestGenerateNegotiationData:
         """Test with MAX_NUM_DATA=5."""
         monkeypatch.setenv("MAX_NUM_DATA", "5")
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         assert len(data) <= 5
         assert len(data) > 0
@@ -42,7 +43,7 @@ class TestGenerateNegotiationData:
         """Test with MAX_NUM_DATA=10."""
         monkeypatch.setenv("MAX_NUM_DATA", "10")
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         assert len(data) <= 10
         assert len(data) > 0
@@ -51,7 +52,7 @@ class TestGenerateNegotiationData:
         """Test with larger MAX_NUM_DATA=50."""
         monkeypatch.setenv("MAX_NUM_DATA", "50")
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         assert len(data) <= 50
         assert len(data) > 0
@@ -60,7 +61,7 @@ class TestGenerateNegotiationData:
         """Test that invalid MAX_NUM_DATA falls back to default 20."""
         monkeypatch.setenv("MAX_NUM_DATA", "invalid")
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         assert len(data) <= 20
 
@@ -68,7 +69,7 @@ class TestGenerateNegotiationData:
         """Test that each scenario has all required keys."""
         monkeypatch.setenv("MAX_NUM_DATA", "5")
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         for scenario in data:
             assert "counts" in scenario
@@ -80,7 +81,7 @@ class TestGenerateNegotiationData:
         """Test that counts and player values have the same length."""
         monkeypatch.setenv("MAX_NUM_DATA", "10")
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         for scenario in data:
             counts_len = len(scenario["counts"])
@@ -91,7 +92,7 @@ class TestGenerateNegotiationData:
         """Test that counts length is between 2 and 10."""
         monkeypatch.setenv("MAX_NUM_DATA", "20")
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         for scenario in data:
             assert 2 <= len(scenario["counts"]) <= 10
@@ -100,7 +101,7 @@ class TestGenerateNegotiationData:
         """Test that count values are between 1 and 5."""
         monkeypatch.setenv("MAX_NUM_DATA", "20")
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         for scenario in data:
             for count in scenario["counts"]:
@@ -110,7 +111,7 @@ class TestGenerateNegotiationData:
         """Test that player values are between 0 and 10."""
         monkeypatch.setenv("MAX_NUM_DATA", "20")
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         for scenario in data:
             for value in scenario["player_0"]:
@@ -123,7 +124,7 @@ class TestGenerateNegotiationData:
         monkeypatch.setenv("MAX_NUM_DATA", "20")
         valid_worths = {32, 64, 128}
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         for scenario in data:
             counts = scenario["counts"]
@@ -144,7 +145,7 @@ class TestGenerateNegotiationData:
         """Test that both players have the same total worth."""
         monkeypatch.setenv("MAX_NUM_DATA", "20")
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         for scenario in data:
             counts = scenario["counts"]
@@ -160,7 +161,7 @@ class TestGenerateNegotiationData:
         """Test that rounds = target_worth // 4."""
         monkeypatch.setenv("MAX_NUM_DATA", "20")
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         for scenario in data:
             counts = scenario["counts"]
@@ -176,7 +177,7 @@ class TestGenerateNegotiationData:
         monkeypatch.setenv("MAX_NUM_DATA", "20")
         valid_rounds = {8, 16, 32}
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         for scenario in data:
             assert scenario["rounds"] in valid_rounds
@@ -185,7 +186,7 @@ class TestGenerateNegotiationData:
         """Test that less than half of the values are zeros for each player."""
         monkeypatch.setenv("MAX_NUM_DATA", "20")
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         for scenario in data:
             player_0 = scenario["player_0"]
@@ -205,8 +206,8 @@ class TestGenerateNegotiationData:
         """Test that multiple calls generate different scenarios (randomness check)."""
         monkeypatch.setenv("MAX_NUM_DATA", "5")
 
-        data1 = generate_negotiation_data()
-        data2 = generate_negotiation_data()
+        data1, _ = generate_negotiation_data()
+        data2, _ = generate_negotiation_data()
 
         # Convert to comparable format
         str1 = str(data1)
@@ -220,9 +221,35 @@ class TestGenerateNegotiationData:
         """Test with MAX_NUM_DATA=0."""
         monkeypatch.setenv("MAX_NUM_DATA", "0")
 
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         assert len(data) == 0
+        assert total_target_worth == 0
+
+    def test_total_target_worth_equals_sum_of_scenario_worths(self, monkeypatch):
+        """Test that total_target_worth equals the sum of all scenario worths."""
+        monkeypatch.setenv("MAX_NUM_DATA", "10")
+
+        data, total_target_worth = generate_negotiation_data()
+
+        # Calculate expected total from scenarios
+        expected_total = 0
+        for scenario in data:
+            counts = scenario["counts"]
+            player_0 = scenario["player_0"]
+            worth = sum(c * v for c, v in zip(counts, player_0))
+            expected_total += worth
+
+        assert total_target_worth == expected_total
+
+    def test_total_target_worth_divisible_by_32(self, monkeypatch):
+        """Test that total_target_worth is divisible by 32 (since all worths are 32, 64, or 128)."""
+        monkeypatch.setenv("MAX_NUM_DATA", "10")
+
+        data, total_target_worth = generate_negotiation_data()
+
+        if len(data) > 0:
+            assert total_target_worth % 32 == 0
 
 
 if __name__ == "__main__":

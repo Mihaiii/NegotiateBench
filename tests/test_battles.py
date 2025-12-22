@@ -17,7 +17,7 @@ class TestBattles:
     @pytest.fixture(autouse=True)
     def setup(self, monkeypatch):
         """Setup test environment variables and paths."""
-        monkeypatch.setenv("MAX_NUM_DATA", "2")
+        monkeypatch.setenv("MAX_NUM_DATA", "10")
         monkeypatch.setenv("NUM_SAMPLES", "4")
 
         # Store original solutions path lookup
@@ -32,10 +32,11 @@ class TestBattles:
 
     def test_generate_negotiation_data(self):
         """Test that negotiation data is generated correctly."""
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         assert len(data) > 0
-        assert len(data) <= 2  # MAX_NUM_DATA is set to 2
+        assert len(data) <= 10  # MAX_NUM_DATA is set to 10
+        assert total_target_worth > 0
 
         for scenario in data:
             assert "counts" in scenario
@@ -73,7 +74,7 @@ class TestBattles:
         monkeypatch.setattr(battlefield, "load_agent_class", patched_load_agent)
 
         models = self.load_test_models()
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         battle_results, battle_scenarios = run_battles(models, data)
 
@@ -81,9 +82,7 @@ class TestBattles:
         assert isinstance(battle_results, dict)
         for model_name, stats in battle_results.items():
             assert "total_profit" in stats
-            assert "sessions" in stats
             assert isinstance(stats["total_profit"], (int, float))
-            assert isinstance(stats["sessions"], int)
 
         # Check battle_scenarios structure
         assert isinstance(battle_scenarios, dict)
@@ -127,7 +126,7 @@ class TestBattles:
         monkeypatch.setenv("NUM_SAMPLES", "4")
 
         models = self.load_test_models()
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         battle_results, battle_scenarios = run_battles(models, data)
 
@@ -158,7 +157,7 @@ class TestBattles:
         monkeypatch.setattr(battlefield, "load_agent_class", patched_load_agent)
 
         models = self.load_test_models()
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         battle_results, battle_scenarios = run_battles(models, data)
 
@@ -196,7 +195,7 @@ class TestBattles:
         monkeypatch.setattr(battlefield, "load_agent_class", patched_load_agent)
 
         models = self.load_test_models()
-        data = generate_negotiation_data()
+        data, total_target_worth = generate_negotiation_data()
 
         battle_results, battle_scenarios = run_battles(models, data)
 

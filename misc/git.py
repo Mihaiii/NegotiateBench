@@ -2,33 +2,31 @@ from pathlib import Path
 import os
 import git
 
+# Initialize repo once at module level
+_repo_path = Path(__file__).parent.parent
+_repo = git.Repo(_repo_path)
+
 
 def pull():
     """Pull from origin and return the current commit hash."""
-    repo_path = Path(__file__).parent
-    repo = git.Repo(repo_path)
-
     # Pull from origin
-    origin = repo.remotes.origin
+    origin = _repo.remotes.origin
     origin.pull()
 
     # Get current commit hash
-    commit_hash = repo.head.commit.hexsha
+    commit_hash = _repo.head.commit.hexsha
     return commit_hash
 
 
 def push():
-    repo_path = Path(__file__).parent
-    repo = git.Repo(repo_path)
-
     # Stage all changes
-    repo.git.add(A=True)
+    _repo.git.add(A=True)
 
     # Commit with message
-    repo.index.commit("[Auto-update] Update LLM generated solutions")
+    _repo.index.commit("[Auto-update] Update LLM generated solutions")
 
     # Push to origin using PAT
-    origin = repo.remotes.origin
+    origin = _repo.remotes.origin
     github_token = os.environ.get("GITHUB_PAT")
     if not github_token:
         raise ValueError("GITHUB_PAT environment variable is not set")
@@ -46,7 +44,7 @@ def push():
         origin.set_url(original_url)
 
     # Get current commit hash
-    commit_hash = repo.head.commit.hexsha
+    commit_hash = _repo.head.commit.hexsha
     return commit_hash
 
 
@@ -61,11 +59,8 @@ def get_code_link(commit_hash: str, model_name: str) -> str:
     Returns:
         A GitHub URL like: https://github.com/owner/repo/blob/{commit_hash}/solutions/{model_name}.py
     """
-    repo_path = Path(__file__).parent
-    repo = git.Repo(repo_path)
-
     # Get the origin URL
-    origin_url = repo.remotes.origin.url
+    origin_url = _repo.remotes.origin.url
 
     # Convert SSH URL to HTTPS if needed: git@github.com:owner/repo.git -> https://github.com/owner/repo
     if origin_url.startswith("git@github.com:"):

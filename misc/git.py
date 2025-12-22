@@ -15,10 +15,6 @@ def pull():
     origin = _repo.remotes.origin
     origin.pull()
 
-    # Get current commit hash
-    commit_hash = _repo.head.commit.hexsha
-    return commit_hash
-
 
 def push():
     # Stage all changes
@@ -78,3 +74,25 @@ def get_code_link(commit_hash: str, model_name: str) -> str:
     # Build the link
     code_link = f"{origin_url}/blob/{commit_hash}/solutions/{sanitized_display_name}.py"
     return code_link
+
+
+# Get the newest commit for each file in the solutions folder and return the newest commit overall
+def get_newest_commit_in_solutions() -> str:
+    """
+    Go through the latest commit for each file in the solutions folder and return the newest commit hash.
+    Returns:
+        The newest commit hash (str) among all files in the solutions folder.
+    """
+    solutions_path = _repo_path / "solutions"
+    newest_commit = None
+    newest_time = None
+    for file in solutions_path.glob("*.py"):
+        # Get the latest commit for this file
+        commits = list(_repo.iter_commits(paths=str(file), max_count=1))
+        if commits:
+            commit = commits[0]
+            commit_time = commit.committed_datetime
+            if newest_time is None or commit_time > newest_time:
+                newest_time = commit_time
+                newest_commit = commit.hexsha
+    return newest_commit

@@ -99,8 +99,9 @@ def extract_python_code(response_text: str) -> str | None:
 def main():
     # Pull from origin and get current commit
     # We need the commit hash in order to get the samples against the top performing model from the db.
-    commit_hash = git.pull()
+    git.pull()
 
+    commit_hash = git.get_newest_commit_in_solutions()
     # Get samples from the database for this commit
     samples = get_samples(commit_hash)
     print(f"Retrieved {len(samples)} samples from database for commit {commit_hash}")

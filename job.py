@@ -116,12 +116,12 @@ def main():
     print(json.dumps(negotiation_data[:2], indent=2))  # Print first 2 for brevity
 
     # Identify top model
-    top_model = get_top_model_latest_session()
+    top_model_name = get_top_model_latest_session()
 
     # Iterate through models and call OpenRouter
     for model in models.copy():
         # do not ask to regenerate code for the top model from the latest session
-        if model == top_model:
+        if model["display_name"] == top_model_name:
             continue
 
         display_name = model["display_name"]

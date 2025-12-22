@@ -1,3 +1,4 @@
+import yaml
 from db.service import get_top_model_latest_session
 from dotenv import load_dotenv
 import json
@@ -96,8 +97,9 @@ def main():
     print(f"Loaded models: {models}")
 
     # Generate negotiation data
-    negotiation_data = generate_negotiation_data()
+    negotiation_data, max_possible_profit = generate_negotiation_data()
     print(f"Generated {len(negotiation_data)} negotiation scenarios")
+    print(f"Max possible profit per model: {max_possible_profit}")
     print(json.dumps(negotiation_data[:2], indent=2))  # Print first 2 for brevity
 
     # Identify top model
@@ -141,28 +143,32 @@ def main():
         print("Battle Results Summary:")
         print("=" * 50)
         for model_name, stats in battle_results.items():
-            sessions = stats["sessions"]
             total_profit = stats["total_profit"]
-            avg_profit = total_profit / sessions if sessions > 0 else 0
+            profit_percentage = (
+                (total_profit * 100.0 / max_possible_profit)
+                if max_possible_profit > 0
+                else 0
+            )
             print(
-                f"{model_name}: {sessions} sessions, total profit: {total_profit}, avg profit: {avg_profit:.2f}"
+                f"{model_name}: max_possible_profit={max_possible_profit}, total_profit={total_profit}, profit_percentage={profit_percentage:.2f}%"
             )
 
-        # Save results to database
-        save_battle_results(battle_results)
+        new_commit_hash = git.push()
 
         # Determine the winner (model with max total profit)
         winner_name = max(
             battle_results.keys(), key=lambda m: battle_results[m]["total_profit"]
         )
         print(f"\nWinner: {winner_name}")
-
-        new_commit_hash = git.push()
         # Save battle scenarios
         save_winner_samples(winner_name, battle_scenarios, new_commit_hash)
 
     except Exception as e:
-        print(f"Failed to run battles or push changes: {e}")
+        print(f"Failed to run battles, push changes or save winner samples: {e}")
+        return
+
+    # Save results to database (only if save_winner_samples succeeded)
+    save_battle_results(battle_results, max_possible_profit, new_commit_hash)
 
 
 def get_algos(prompts, system_prompt, display_name, openrouter_name, current_code):
@@ -204,4 +210,16 @@ def get_algos(prompts, system_prompt, display_name, openrouter_name, current_cod
 
 
 if __name__ == "__main__":
-    main()
+    os.environ["MAX_NUM_DATA"] = "4"
+    os.environ["NUM_SAMPLES"] = "1"
+    config_path = Path(__file__).parent / "tests" / "models2.yaml"
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+    models = config.get("models", [])
+    negotiation_data, max_possible_profit = generate_negotiation_data()
+    battle_results, battle_scenarios = run_battles(models, negotiation_data)
+    print(negotiation_data)
+    print("-" * 20)
+    print(battle_results)
+    print("-" * 20)
+    print(battle_scenarios)

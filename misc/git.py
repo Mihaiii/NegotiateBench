@@ -27,15 +27,17 @@ def push():
     # Commit with message
     repo.index.commit("[Auto-update] Update LLM generated solutions")
 
-    # Push to origin using PAT token
+    # Push to origin using PAT
     origin = repo.remotes.origin
-    github_token = os.environ.get("GITHUB_PAT_TOKEN")
+    github_token = os.environ.get("GITHUB_PAT")
     if not github_token:
-        raise ValueError("GITHUB_PAT_TOKEN environment variable is not set")
+        raise ValueError("GITHUB_PAT environment variable is not set")
 
     # Convert to authenticated URL: https://<token>@github.com/...
     original_url = origin.url
-    auth_url = original_url.replace("https://github.com/", f"https://{github_token}@github.com/")
+    auth_url = original_url.replace(
+        "https://github.com/", f"https://{github_token}@github.com/"
+    )
     origin.set_url(auth_url)
     try:
         origin.push()
@@ -46,3 +48,33 @@ def push():
     # Get current commit hash
     commit_hash = repo.head.commit.hexsha
     return commit_hash
+
+
+def get_code_link(commit_hash: str, model_name: str) -> str:
+    """
+    Generate a GitHub link to the model's solution file at a specific commit.
+
+    Args:
+        commit_hash: The git commit hash
+        model_name: The model's display name (used as the filename)
+
+    Returns:
+        A GitHub URL like: https://github.com/owner/repo/blob/{commit_hash}/solutions/{model_name}.py
+    """
+    repo_path = Path(__file__).parent
+    repo = git.Repo(repo_path)
+
+    # Get the origin URL
+    origin_url = repo.remotes.origin.url
+
+    # Convert SSH URL to HTTPS if needed: git@github.com:owner/repo.git -> https://github.com/owner/repo
+    if origin_url.startswith("git@github.com:"):
+        origin_url = origin_url.replace("git@github.com:", "https://github.com/")
+
+    # Remove .git suffix if present
+    if origin_url.endswith(".git"):
+        origin_url = origin_url[:-4]
+
+    # Build the link
+    code_link = f"{origin_url}/blob/{commit_hash}/solutions/{model_name}.py"
+    return code_link

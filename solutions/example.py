@@ -8,7 +8,6 @@ class Agent:
             self.total += counts[i] * values[i]
 
     def offer(self, o):
-        print(f"{self.rounds} rounds left")
         self.rounds -= 1
         if o:
             sum_val = 0

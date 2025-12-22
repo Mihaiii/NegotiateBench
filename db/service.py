@@ -1,6 +1,10 @@
 import os
+from datetime import datetime, timezone
+
 import psycopg2
 from dotenv import load_dotenv
+
+from misc.git import get_code_link
 
 # Load environment variables from .env file
 load_dotenv()
@@ -26,7 +30,7 @@ def get_top_model_latest_session():
         cursor.execute(
             """
             SELECT model_name
-            FROM negociations_leaderboard_latest
+            FROM negotiations_leaderboard_latest
             WHERE rank = 1
             LIMIT 1;
             """
@@ -79,14 +83,15 @@ def get_samples(commit_hash):
     return results
 
 
-def save_battle_results(results: dict):
+def save_battle_results(results: dict, max_possible_profit: int, commit_hash: str):
     """
-    Save battle results to the negociations table.
+    Save battle results to the negotiations table.
 
     Args:
         results: Dictionary with model names as keys and dicts containing:
             - 'total_profit': accumulated profit across all sessions
-            - 'sessions': number of negotiation sessions
+        max_possible_profit: Maximum possible profit (same for all models)
+        commit_hash: The git commit hash for generating code links
     """
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL environment variable must be set")
@@ -94,18 +99,27 @@ def save_battle_results(results: dict):
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
+    # Use the same timestamp for all records in this transaction
+    timestamp = datetime.now(timezone.utc)
+
     try:
         for model_name, stats in results.items():
-            sessions = stats["sessions"]
             total_profit = stats["total_profit"]
 
-            if sessions > 0:
+            if max_possible_profit > 0:
+                code_link = get_code_link(commit_hash, model_name)
                 cursor.execute(
                     """
-                    INSERT INTO negociations (model_name, negociations, profit)
-                    VALUES (%s, %s, %s);
+                    INSERT INTO negotiations (model_name, max_possible_profit, profit, code_link, timestamp)
+                    VALUES (%s, %s, %s, %s, %s);
                     """,
-                    (model_name, sessions, total_profit),
+                    (
+                        model_name,
+                        max_possible_profit,
+                        total_profit,
+                        code_link,
+                        timestamp,
+                    ),
                 )
 
         conn.commit()

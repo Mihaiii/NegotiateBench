@@ -76,6 +76,11 @@ def generate_negotiation_data():
     - Both lists have the same length (between 2 and 10)
     - The total worth (sum of counts[i] * values[i]) is the same for both players
     - Total worth can be 32, 64, or 128
+
+    Returns:
+        A tuple of (negotiation_data, max_possible_profit) where:
+        - negotiation_data: list of scenarios
+        - max_possible_profit: sum of all scenario worths (same for all models)
     """
 
     # Get max_num_data from environment variable, default to 20
@@ -133,6 +138,7 @@ def generate_negotiation_data():
         return None
 
     data = []
+    max_possible_profit = 0
     target_worths = [32, 64, 128]
 
     for _ in range(max_num_data):
@@ -165,7 +171,10 @@ def generate_negotiation_data():
             }
         )
 
-    return data
+        # Add to max_possible_profit (same worth for each player in each scenario)
+        max_possible_profit += target_worth
+
+    return data, max_possible_profit
 
 
 def run_negotiation(agent_0, agent_1, counts, max_rounds):
@@ -245,7 +254,9 @@ def calculate_profit(items, values):
 
 
 def run_battles(
-    models: list[dict], negotiation_data: list[dict], num_samples: int = 5
+    models: list[dict],
+    negotiation_data: list[dict],
+    num_samples: int = 5,
 ) -> tuple[dict, dict]:
     """
     Run negotiation battles between all pairs of models.
@@ -259,7 +270,6 @@ def run_battles(
         A tuple of:
         - results: Dictionary with model display names as keys and dicts containing:
             - 'total_profit': accumulated profit across all sessions
-            - 'sessions': number of negotiation sessions
         - battle_scenarios: Dictionary mapping (model_X, model_Y) to list of scenario data.
             For each pair, stores up to num_samples scenarios, with num_samples // 2 where
             model_X is agent_0 and the rest where model_X is agent_1. Each scenario contains:
@@ -287,7 +297,9 @@ def run_battles(
     # Initialize results for all models
     for model in models:
         display_name = model["display_name"]
-        results[display_name] = {"total_profit": 0, "sessions": 0}
+        results[display_name] = {
+            "total_profit": 0,
+        }
 
     # Run each model against every other model
     for i, model_0 in enumerate(models):
@@ -333,11 +345,9 @@ def run_battles(
                     profit_0 = calculate_profit(items_0, values_0)
                     profit_1 = calculate_profit(items_1, values_1)
 
-                    # Update results
+                    # Update results (max_possible_profit was set at initialization)
                     results[display_name_0]["total_profit"] += profit_0
-                    results[display_name_0]["sessions"] += 1
                     results[display_name_1]["total_profit"] += profit_1
-                    results[display_name_1]["sessions"] += 1
 
                     print(
                         f"  Scenario result: {outcome}, profits: {display_name_0}={profit_0}, {display_name_1}={profit_1}"
@@ -384,8 +394,6 @@ def run_battles(
 
                 except Exception as e:
                     print(f"  Error in scenario: {e}")
-                    # Still count the session but with 0 profit
-                    results[display_name_0]["sessions"] += 1
-                    results[display_name_1]["sessions"] += 1
+                    # Still count the scenario but with 0 profit (max_possible_profit was already set)
 
     return results, battle_scenarios

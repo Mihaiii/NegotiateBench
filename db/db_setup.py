@@ -23,29 +23,29 @@ def setup_database():
 
     try:
         # Create table
-        print("Creating table 'negociations'...")
+        print("Creating table 'negotiations'...")
         cursor.execute(
             """
-            CREATE TABLE IF NOT EXISTS negociations (
+            CREATE TABLE IF NOT EXISTS negotiations (
                 id BIGSERIAL PRIMARY KEY,
                 model_name TEXT NOT NULL,
-                negociations INTEGER NOT NULL,
+                max_possible_profit INTEGER NOT NULL,
                 profit NUMERIC NOT NULL,
                 code_link TEXT,
-                timestamp TIMESTAMPTZ DEFAULT NOW()
+                timestamp TIMESTAMPTZ
             );
             """
         )
-        print("Table 'negociations' created or already exists.")
+        print("Table 'negotiations' created or already exists.")
 
         # Create index on timestamp
         cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_negociations_timestamp ON negociations(timestamp);"
+            "CREATE INDEX IF NOT EXISTS idx_negotiations_timestamp ON negotiations(timestamp);"
         )
         print("Index on timestamp created or already exists.")
 
         # Enable RLS
-        cursor.execute("ALTER TABLE negociations ENABLE ROW LEVEL SECURITY;")
+        cursor.execute("ALTER TABLE negotiations ENABLE ROW LEVEL SECURITY;")
         print("RLS enabled.")
 
         # Create policy if it doesn't exist
@@ -55,10 +55,10 @@ def setup_database():
             BEGIN
                 IF NOT EXISTS (
                     SELECT 1 FROM pg_policies
-                    WHERE tablename = 'negociations'
+                    WHERE tablename = 'negotiations'
                     AND policyname = 'public_read_only'
                 ) THEN
-                    CREATE POLICY public_read_only ON negociations
+                    CREATE POLICY public_read_only ON negotiations
                         FOR SELECT
                         TO anon, authenticated
                         USING (true);
@@ -69,51 +69,53 @@ def setup_database():
         print("Public read-only policy created or already exists.")
 
         # Grant SELECT on table to anon and authenticated roles
-        cursor.execute("GRANT SELECT ON negociations TO anon, authenticated;")
+        cursor.execute("GRANT SELECT ON negotiations TO anon, authenticated;")
         print("Public read access granted to table.")
 
         # Create or replace view
         cursor.execute(
             """
-            CREATE OR REPLACE VIEW negociations_leaderboard AS
+            CREATE OR REPLACE VIEW negotiations_leaderboard AS
             SELECT
-                ROW_NUMBER() OVER (ORDER BY SUM(profit) / SUM(negociations) DESC) AS rank,
+                ROW_NUMBER() OVER (ORDER BY (SUM(profit) * 100.0 / SUM(max_possible_profit)) DESC) AS rank,
                 model_name,
-                SUM(negociations) AS negociations,
-                SUM(profit) / SUM(negociations) AS avg_profit
-            FROM negociations
+                SUM(max_possible_profit) AS max_possible_profit,
+                SUM(profit) AS total_profit,
+                (SUM(profit) * 100.0 / SUM(max_possible_profit))::NUMERIC(5,2) AS profit_percentage
+            FROM negotiations
             GROUP BY model_name
-            ORDER BY avg_profit DESC;
+            ORDER BY profit_percentage DESC;
             """
         )
-        print("View 'negociations_leaderboard' created or replaced.")
+        print("View 'negotiations_leaderboard' created or replaced.")
 
         # Create or replace view for latest timestamp only
         cursor.execute(
             """
-            CREATE OR REPLACE VIEW negociations_leaderboard_latest AS
+            CREATE OR REPLACE VIEW negotiations_leaderboard_latest AS
             SELECT
-                ROW_NUMBER() OVER (ORDER BY SUM(profit) / SUM(negociations) DESC) AS rank,
+                ROW_NUMBER() OVER (ORDER BY (SUM(profit) * 100.0 / SUM(max_possible_profit)) DESC) AS rank,
                 model_name,
-                SUM(negociations) AS negociations,
-                SUM(profit) / SUM(negociations) AS avg_profit
-            FROM negociations
-            WHERE timestamp = (SELECT MAX(timestamp) FROM negociations)
+                SUM(max_possible_profit) AS max_possible_profit,
+                SUM(profit) AS total_profit,
+                (SUM(profit) * 100.0 / SUM(max_possible_profit))::NUMERIC(5,2) AS profit_percentage
+            FROM negotiations
+            WHERE timestamp = (SELECT MAX(timestamp) FROM negotiations)
             GROUP BY model_name
-            ORDER BY avg_profit DESC;
+            ORDER BY profit_percentage DESC;
             """
         )
-        print("View 'negociations_leaderboard_latest' created or replaced.")
+        print("View 'negotiations_leaderboard_latest' created or replaced.")
 
         # Grant SELECT on latest view to anon and authenticated roles
         cursor.execute(
-            "GRANT SELECT ON negociations_leaderboard_latest TO anon, authenticated;"
+            "GRANT SELECT ON negotiations_leaderboard_latest TO anon, authenticated;"
         )
         print("Public read access granted to latest view.")
 
         # Grant SELECT on view to anon and authenticated roles
         cursor.execute(
-            "GRANT SELECT ON negociations_leaderboard TO anon, authenticated;"
+            "GRANT SELECT ON negotiations_leaderboard TO anon, authenticated;"
         )
         print("Public read access granted to view.")
 

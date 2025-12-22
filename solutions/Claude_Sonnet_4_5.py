@@ -25,16 +25,21 @@ class Agent:
         """Accept based on value threshold and urgency"""
         turns_left = self.max_rounds * 2 - self.current_turn
         
+        # On last turn, accept anything positive
         if turns_left <= 1:
             return offer_value > 0
-        elif turns_left <= 3:
-            threshold = self.total_value * 0.30
+        
+        # Dynamic threshold based on remaining turns
+        if turns_left <= 2:
+            threshold = self.total_value * 0.25
+        elif turns_left <= 4:
+            threshold = self.total_value * 0.35
         elif turns_left <= 6:
-            threshold = self.total_value * 0.40
+            threshold = self.total_value * 0.42
         elif turns_left <= 10:
-            threshold = self.total_value * 0.50
+            threshold = self.total_value * 0.48
         else:
-            threshold = self.total_value * 0.55
+            threshold = self.total_value * 0.52
         
         return offer_value >= threshold
     
@@ -42,114 +47,129 @@ class Agent:
         """Generate offer with adaptive strategy"""
         turns_left = self.max_rounds * 2 - self.current_turn
         
-        # Analyze opponent preferences from their offers
+        # Estimate opponent preferences
         opponent_values = self._estimate_opponent_values()
         
-        # Calculate progress ratio
+        # Progress ratio (0 to 1)
         progress = self.current_turn / (self.max_rounds * 2)
         
-        # Start aggressive, become cooperative
-        if progress < 0.4:
+        # Strategy selection based on progress
+        if progress < 0.35:
             return self._make_aggressive_offer(opponent_values)
-        elif progress < 0.7:
+        elif progress < 0.70:
             return self._make_balanced_offer(opponent_values)
         else:
             return self._make_concession_offer(opponent_values)
     
     def _estimate_opponent_values(self) -> list[float]:
-        """Estimate opponent's relative item values"""
+        """Estimate opponent's relative item preferences"""
         if not self.opponent_offers:
-            # Assume complementary preferences initially
+            # Initial assumption: opponent values what we don't
             max_val = max(self.values) if max(self.values) > 0 else 1
             return [1.0 - (self.values[i] / max_val) for i in range(self.n_items)]
         
-        # Analyze what opponent consistently requests
-        avg_request = [0.0] * self.n_items
+        # Analyze opponent's consistent requests
+        total_requests = [0.0] * self.n_items
         for offer in self.opponent_offers:
             for i in range(self.n_items):
-                if self.counts[i] > 0:
-                    avg_request[i] += offer[i] / self.counts[i]
+                total_requests[i] += offer[i]
         
-        if len(self.opponent_offers) > 0:
-            avg_request = [x / len(self.opponent_offers) for x in avg_request]
+        # Normalize by counts and number of offers
+        normalized = []
+        for i in range(self.n_items):
+            if self.counts[i] > 0:
+                normalized.append(total_requests[i] / (self.counts[i] * len(self.opponent_offers)))
+            else:
+                normalized.append(0.0)
         
-        # Normalize
-        max_req = max(avg_request) if max(avg_request) > 0 else 1
-        return [x / max_req for x in avg_request]
+        # Scale to 0-1 range
+        max_norm = max(normalized) if max(normalized) > 0 else 1
+        return [x / max_norm for x in normalized]
     
     def _make_aggressive_offer(self, opp_values: list[float]) -> list[int]:
-        """Take most valuable items, give away less valuable ones"""
+        """Claim high-value items, concede low-value items"""
         offer = [0] * self.n_items
         
+        # Normalize our values
+        max_my_val = max(self.values) if max(self.values) > 0 else 1
+        my_normalized = [v / max_my_val for v in self.values]
+        
         for i in range(self.n_items):
-            # Take items we value more than opponent likely does
-            my_rel_val = self.values[i] / max(self.values) if max(self.values) > 0 else 0
-            
-            if my_rel_val > opp_values[i] + 0.1:
+            # Take items where we have stronger preference
+            if my_normalized[i] > opp_values[i] + 0.2:
                 offer[i] = self.counts[i]
-            elif my_rel_val > opp_values[i] - 0.2:
+            elif my_normalized[i] > opp_values[i]:
+                offer[i] = max(int(self.counts[i] * 0.7), self.counts[i] - 1) if self.counts[i] > 0 else 0
+            elif my_normalized[i] > 0.3:
                 offer[i] = max(1, self.counts[i] // 2)
         
-        # Ensure minimum value
-        if sum(offer[i] * self.values[i] for i in range(self.n_items)) < self.total_value * 0.6:
-            for i in sorted(range(self.n_items), key=lambda x: self.values[x], reverse=True):
-                if offer[i] < self.counts[i]:
-                    offer[i] = self.counts[i]
-                    if sum(offer[j] * self.values[j] for j in range(self.n_items)) >= self.total_value * 0.6:
-                        break
-        
+        # Ensure we get at least 55% of total value
+        self._ensure_minimum_value(offer, 0.55)
         return offer
     
     def _make_balanced_offer(self, opp_values: list[float]) -> list[int]:
-        """Seek mutually beneficial split"""
+        """Seek mutually beneficial distribution"""
         offer = [0] * self.n_items
         
+        max_my_val = max(self.values) if max(self.values) > 0 else 1
+        my_normalized = [v / max_my_val for v in self.values]
+        
         for i in range(self.n_items):
-            my_rel_val = self.values[i] / max(self.values) if max(self.values) > 0 else 0
+            diff = my_normalized[i] - opp_values[i]
             
-            if my_rel_val > opp_values[i] + 0.15:
+            if diff > 0.25:
                 offer[i] = self.counts[i]
-            elif my_rel_val < opp_values[i] - 0.15:
-                offer[i] = 0
-            else:
-                # Split contested items
+            elif diff > 0.1:
+                offer[i] = max(int(self.counts[i] * 0.65), 1) if self.counts[i] > 0 else 0
+            elif diff > -0.1:
                 offer[i] = self.counts[i] // 2
+            elif diff > -0.25:
+                offer[i] = max(int(self.counts[i] * 0.35), 0)
+            else:
+                offer[i] = 0
         
-        # Ensure reasonable value
-        current_value = sum(offer[i] * self.values[i] for i in range(self.n_items))
-        if current_value < self.total_value * 0.45:
-            for i in sorted(range(self.n_items), key=lambda x: self.values[x], reverse=True):
-                if offer[i] < self.counts[i]:
-                    offer[i] = self.counts[i]
-                    current_value = sum(offer[j] * self.values[j] for j in range(self.n_items))
-                    if current_value >= self.total_value * 0.5:
-                        break
-        
+        # Ensure we get at least 45% of total value
+        self._ensure_minimum_value(offer, 0.45)
         return offer
     
     def _make_concession_offer(self, opp_values: list[float]) -> list[int]:
-        """Make significant concessions to reach agreement"""
+        """Make significant concessions to avoid deadlock"""
         offer = [0] * self.n_items
         
+        max_my_val = max(self.values) if max(self.values) > 0 else 1
+        my_normalized = [v / max_my_val for v in self.values]
+        
         for i in range(self.n_items):
-            my_rel_val = self.values[i] / max(self.values) if max(self.values) > 0 else 0
+            diff = my_normalized[i] - opp_values[i]
             
-            # Only take items we clearly value more
-            if my_rel_val > opp_values[i] + 0.25:
+            # Only strongly claim items we clearly value more
+            if diff > 0.3:
                 offer[i] = self.counts[i]
-            elif my_rel_val > opp_values[i]:
-                offer[i] = max(self.counts[i] // 2, 1) if self.counts[i] > 0 else 0
+            elif diff > 0.15:
+                offer[i] = max(int(self.counts[i] * 0.6), 1) if self.counts[i] > 0 else 0
+            elif diff > 0:
+                offer[i] = max(int(self.counts[i] * 0.4), 0)
+            else:
+                offer[i] = 0
         
-        # Accept lower threshold late in negotiation
-        current_value = sum(offer[i] * self.values[i] for i in range(self.n_items))
-        target = self.total_value * 0.35
-        
-        if current_value < target:
-            for i in sorted(range(self.n_items), key=lambda x: self.values[x], reverse=True):
-                if offer[i] < self.counts[i] and self.values[i] > 0:
-                    offer[i] = min(offer[i] + 1, self.counts[i])
-                    current_value = sum(offer[j] * self.values[j] for j in range(self.n_items))
-                    if current_value >= target:
-                        break
-        
+        # Lower threshold for late-game: accept 35% of total value
+        self._ensure_minimum_value(offer, 0.35)
         return offer
+    
+    def _ensure_minimum_value(self, offer: list[int], min_ratio: float) -> None:
+        """Adjust offer to meet minimum value threshold"""
+        current_value = sum(offer[i] * self.values[i] for i in range(self.n_items))
+        target_value = self.total_value * min_ratio
+        
+        if current_value < target_value:
+            # Sort items by value in descending order
+            sorted_indices = sorted(range(self.n_items), key=lambda x: self.values[x], reverse=True)
+            
+            for i in sorted_indices:
+                if self.values[i] > 0 and offer[i] < self.counts[i]:
+                    # Increase allocation for this item
+                    offer[i] = self.counts[i]
+                    current_value = sum(offer[j] * self.values[j] for j in range(self.n_items))
+                    
+                    if current_value >= target_value:
+                        break

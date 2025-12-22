@@ -1,113 +1,95 @@
-from typing import List, Optional
-
 class Agent:
-    def __init__(self, me: int, counts: List[int], values: List[int], max_rounds: int):
+    """
+    A negotiation agent that uses a time-based concession strategy.
+    
+    The agent:
+    1. Starts by demanding all items it values > 0 (ignores zero-value items)
+    2. Accepts offers meeting a threshold that decreases from 70% to 10% of total value
+    3. Concedes items in order: zero-value items first, then by increasing personal value
+    4. Makes one concession per turn where opponent's offer is rejected
+    """
+    
+    def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
         self.me = me
         self.counts = counts
         self.values = values
         self.max_rounds = max_rounds
         
-        self.num_types = len(counts)
+        # Total value of all items to us
         self.total_value = sum(c * v for c, v in zip(counts, values))
-        self.turn_number = 0
         
-        # Negotiation state
-        self.current_offer = None
-        self.last_opp_offer = None
-        self.opp_repeats = 0
+        # Turn counter
+        self.turn = 0
         
-        # Acceptance threshold (high initially)
-        self.accept_threshold = self.total_value * 0.85
+        # Initial demand: claim all items we value positively
+        self.current_offer = [counts[i] if values[i] > 0 else 0 
+                             for i in range(len(counts))]
         
-        # Stubbornness: concessions only after opponent repeats this many times
-        self.stubbornness = 3
+        # Concession order: by increasing our valuation, then by decreasing count
+        self.concession_order = sorted(
+            range(len(counts)),
+            key=lambda i: (values[i], -counts[i])
+        )
     
-    def _our_value(self, offer: List[int]) -> int:
-        """Calculate value of an offer according to our valuation"""
+    def _value(self, offer: list[int]) -> int:
+        """Calculate value of an offer to us"""
+        if offer is None:
+            return 0
         return sum(v * a for v, a in zip(self.values, offer))
     
-    def _turns_remaining(self) -> int:
-        """Calculate turns left in negotiation"""
-        return self.max_rounds * 2 - self.turn_number
+    def _validate(self, offer: list[int]) -> list[int]:
+        """Ensure offer is valid (0 <= offer[i] <= counts[i])"""
+        return [min(max(0, offer[i]), self.counts[i]) for i in range(len(self.counts))]
     
-    def _should_accept(self, offer: List[int]) -> bool:
-        """Determine if we should accept opponent's offer"""
-        if self.total_value == 0:
+    def _turns_left(self) -> int:
+        """Calculate turns remaining in negotiation"""
+        return max(0, self.max_rounds * 2 - self.turn)
+    
+    def _should_accept(self, opp_offer: list[int]) -> bool:
+        """Accept if offer meets time-decreasing threshold (70% → 10%)"""
+        if self.total_value == 0:  # Everything is worthless
             return True
         
-        value = self._our_value(offer)
-        turns_left = self._turns_remaining()
+        value = self._value(opp_offer)
         
-        # Become more flexible as deadline approaches
-        if turns_left <= 2:
-            return value >= self.total_value * 0.25
-        if turns_left <= 5:
-            return value >= self.total_value * 0.45
+        if value >= self.total_value:  # Perfect offer
+            return True
         
-        return value >= self.accept_threshold
+        if self._turns_left() <= 1:  # Last turn: accept anything
+            return True
+        
+        # Threshold linearly decreases with progress
+        progress = self.turn / (self.max_rounds * 2)
+        threshold = self.total_value * (0.7 - 0.6 * progress)
+        
+        return value >= int(threshold + 0.5)
     
-    def _make_initial_offer(self) -> List[int]:
-        """Maximalist: ask for all items"""
-        return self.counts[:]
-    
-    def _make_concession(self) -> List[int]:
-        """Create a new offer with minimal concession"""
-        if self.current_offer is None:
-            return self._make_initial_offer()
-        
-        offer = self.current_offer[:]
-        
-        # First, give away all items worth 0 to us
+    def _concede(self) -> None:
+        """Make one minimal concession: give away zero-value items or one unit of lowest-value item"""
+        # First pass: give away all zero-value items
         for i, val in enumerate(self.values):
-            if val == 0 and offer[i] > 0:
-                offer[i] = 0
-                return offer
+            if val == 0 and self.current_offer[i] > 0:
+                self.current_offer[i] = 0
+                return
         
-        # Then give away one unit of the lowest-value item we have
-        sorted_indices = sorted(range(self.num_types), key=lambda i: self.values[i])
-        for i in sorted_indices:
-            if offer[i] > 0:
-                offer[i] -= 1
-                return offer
-        
-        return offer
+        # Second pass: give one unit of least valuable item
+        for i in self.concession_order:
+            if self.current_offer[i] > 0:
+                self.current_offer[i] -= 1
+                return
     
-    def _validate_offer(self, offer: List[int]) -> List[int]:
-        """Ensure offer is valid (doesn't exceed available items)"""
-        return [min(offer[i], self.counts[i]) for i in range(self.num_types)]
-    
-    def offer(self, o: Optional[List[int]]) -> Optional[List[int]]:
-        """Main negotiation entry point - called each turn"""
-        self.turn_number += 1
+    def offer(self, o: list[int] | None) -> list[int] | None:
+        """Main negotiation turn: accept or make counter-offer"""
+        self.turn += 1
         
-        # Process opponent's offer if provided
-        if o is not None:
-            # Track opponent offer repetitions
-            if self.last_opp_offer is not None and o == self.last_opp_offer:
-                self.opp_repeats += 1
-            else:
-                self.opp_repeats = 1
-                self.last_opp_offer = o[:]
+        if o is not None:  # Opponent made an offer
+            opp_offer = self._validate(o)
             
-            # Accept if offer is good enough
-            if self._should_accept(o):
-                return None
+            if self._should_accept(opp_offer):
+                return None  # Accept
+            
+            # Reject and make a concession
+            self._concede()
         
-        # Generate our offer
-        
-        # First turn: ask for everything
-        if self.current_offer is None:
-            self.current_offer = self._make_initial_offer()
-            return self._validate_offer(self.current_offer)
-        
-        # Adjust patience based on remaining time
-        turns_left = self._turns_remaining()
-        if turns_left <= 5:
-            self.stubbornness = 2  # Be less patient near deadline
-        
-        # Concede only if opponent is being stubborn
-        if self.opp_repeats >= self.stubbornness:
-            self.current_offer = self._make_concession()
-            self.opp_repeats = 0
-        
-        return self._validate_offer(self.current_offer)
+        # Return our (possibly conceded) offer
+        return self._validate(self.current_offer)

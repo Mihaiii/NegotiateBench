@@ -12,7 +12,7 @@ class Agent:
         self.turn = 0
 
     def utility(self, off):
-        return sum((self.counts[i] - off[i]) * self.values[i] for i in range(self.n_types))
+        return sum(off[i] * self.values[i] for i in range(self.n_types))
 
     def compute_offer(self, estimated_p):
         offer = []
@@ -57,7 +57,7 @@ class Agent:
                 for i in range(self.n_types):
                     c = self.counts[i]
                     if c > 0:
-                        f = past_o[i] / c
+                        f = (self.counts[i] - past_o[i]) / c
                         prop[i] += f
             for i in range(self.n_types):
                 if self.counts[i] > 0:

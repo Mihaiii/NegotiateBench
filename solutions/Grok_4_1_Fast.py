@@ -11,9 +11,9 @@ class Agent:
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.our_turns += 1
         n = len(self.counts)
-        progress = min(1.0, self.our_turns / (self.max_rounds + 1.0))
+        progress = min(1.0, self.our_turns / float(self.max_rounds)) if self.max_rounds > 0 else 1.0
 
-        # Accept immediately on last turn if positive value
+        # Accept on last turn if positive value
         if o is not None and self.our_turns >= self.max_rounds:
             our_val = sum(self.values[i] * o[i] for i in range(n))
             if our_val > 0:
@@ -30,16 +30,19 @@ class Agent:
         if len(self.opp_offers) == 0:
             return [self.counts[i] if self.values[i] > 0 else 0 for i in range(n)]
 
-        # Estimate opponent's relative keeps
-        avg_rel_keep = [0.0] * n
+        # Weighted average opponent's relative keeps (more weight to early offers)
         num_off = len(self.opp_offers)
-        for oo in self.opp_offers:
+        sum_weight = num_off * (num_off + 1) / 2.0
+        avg_rel_keep = [0.0] * n
+        for jj in range(num_off):
+            weight = num_off - jj
+            oo = self.opp_offers[jj]
             for i in range(n):
                 keep = self.counts[i] - oo[i]
                 rel = keep / self.counts[i] if self.counts[i] > 0 else 0.0
-                avg_rel_keep[i] += rel
+                avg_rel_keep[i] += weight * rel
         for i in range(n):
-            avg_rel_keep[i] /= num_off
+            avg_rel_keep[i] /= sum_weight
 
         total_avg_keep_items = sum(avg_rel_keep[j] * self.counts[j] for j in range(n))
         if total_avg_keep_items < 1e-6:
@@ -49,9 +52,9 @@ class Agent:
 
         # Fair split biased by progress
         prop = [0] * n
+        k = 0.3 + 0.7 * progress
         for i in range(n):
             est_opp_vi = mu * avg_rel_keep[i]
-            k = 0.3 + 0.7 * progress  # bias from aggressive to fair
             denom = self.values[i] + k * est_opp_vi + 1e-9
             frac = self.values[i] / denom
             s = round(frac * self.counts[i])
@@ -66,13 +69,13 @@ class Agent:
             s = round(mixed)
             proposal[i] = max(0, min(self.counts[i], s))
 
-        # Extra concession near end
+        # Extra concession near end if our proposal too aggressive
         if progress > 0.9 and self.opp_offers:
             prop_val = sum(self.values[i] * proposal[i] for i in range(n))
-            if prop_val < self.total * 0.6:
+            if prop_val > self.total * 0.65:
                 last_o = self.opp_offers[-1]
                 for i in range(n):
-                    mixed = (proposal[i] * 0.7 + last_o[i] * 0.3)
+                    mixed = proposal[i] * 0.6 + last_o[i] * 0.4
                     proposal[i] = max(0, min(self.counts[i], round(mixed)))
 
         return proposal

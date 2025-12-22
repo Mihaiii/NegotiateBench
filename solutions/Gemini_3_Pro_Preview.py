@@ -1,4 +1,5 @@
 import itertools
+import random
 
 class Agent:
     def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
@@ -8,84 +9,146 @@ class Agent:
         self.max_rounds = max_rounds
         self.rounds_left = max_rounds
         self.total_value = sum(c * v for c, v in zip(counts, values))
-
-        # 1. Generate all possible partitions of items I can receive.
-        # Create ranges for each item type: [0, 1, ... count].
-        ranges = [range(c + 1) for c in counts]
-        all_bundles = []
         
-        # Calculate value for every permutation of items.
-        for bundle in itertools.product(*ranges):
-            val = sum(q * v for q, v in zip(bundle, values))
-            # Store tuple: (my_value, total_item_count, bundle_list)
-            all_bundles.append((val, sum(bundle), list(bundle)))
+        # Opponent modeling: Weighted popularity of items the opponent keeps.
+        # Initialized with small epsilon to handle initial math safely.
+        self.opp_kept_counts = [0.1] * len(counts) 
+        
+        # 1. Generate all possible partitions (bundles) for myself.
+        # We store tuples of (MyValue, ItemCount, BundleList).
+        self.sorted_bundles = []
+        
+        # Calculate state space size to decide between Exhaustive vs Random generation
+        state_space_size = 1
+        for c in counts:
+            state_space_size *= (c + 1)
+            
+        ranges = [range(c + 1) for c in counts]
+        
+        # Threshold for switching to stochastic generation to prevent timeout on huge inputs
+        if state_space_size <= 50000:
+            for bundle in itertools.product(*ranges):
+                self._add_bundle(bundle)
+        else:
+            # Random sampling for large state spaces
+            seen = set()
+            # Always include extreme cases
+            self._add_bundle(tuple(counts)) # All
+            self._add_bundle(tuple(0 for _ in counts)) # Nothing
+            seen.add(tuple(counts))
+            seen.add(tuple(0 for _ in counts))
+            
+            attempts = 0
+            while len(self.sorted_bundles) < 10000 and attempts < 40000:
+                attempts += 1
+                bundle = tuple(random.randint(0, c) for c in counts)
+                if bundle not in seen:
+                    self._add_bundle(bundle)
+                    seen.add(bundle)
 
-        # 2. Sort bundles to prioritize my gain.
-        # Primary Key: My Value (High to Low).
-        # Secondary Key: Total Items I Take (Low to High). 
-        # Heuristic: If value is equal, taking fewer items leaves more for the opponent,
-        # increasing the probability they find utility in the remainder.
-        # Note: In Python sort, True > False. We construct key so Descending sort works for both logic.
-        # But simple lambda with reverse=True: (Value, -ItemCount)
-        # Higher value comes first. For ties, less negative ItemCount (smaller count) comes first? 
-        # No, -2 > -5. So (10, 2) comes before (10, 5).
-        all_bundles.sort(key=lambda x: (x[0], -x[1]), reverse=True)
-        self.sorted_bundles = all_bundles
+        # 2. Sort bundles: 
+        # Primary: My Value (High to Low).
+        # Secondary: Total Items I take (Low to High).
+        # Theory: If value is same, taking fewer items leaves more for the opponent, 
+        # increasing potential utility for them (Pareto optimality guess).
+        self.sorted_bundles.sort(key=lambda x: (x[0], -sum(x[1])), reverse=True)
+
+    def _add_bundle(self, bundle):
+        val = sum(q * v for q, v in zip(bundle, self.values))
+        # Store: (Value, BundleTuple)
+        self.sorted_bundles.append((val, bundle))
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        # Calculate how much time has passed (0.0 to 1.0)
-        # If rounds_left = max, progress = 0. If rounds_left = 1, progress = 1.
-        progress = (self.max_rounds - self.rounds_left) / max(1, self.max_rounds - 1) if self.max_rounds > 1 else 1.0
-        
-        # Concession Strategy:
-        # Define the range of acceptable values based on time.
-        max_val = self.sorted_bundles[0][0]
-        reservation_val = int(self.total_value / 2) # We aim for at least half
-        
-        # Calculate current aspiration level (Linear concession)
-        current_threshold = max_val - (max_val - reservation_val) * progress
-
-        # 1. Evaluate Opponent's Offer (if exists)
+        # 1. Update Opponent Model and Handle Incoming Offer
         if o is not None:
-            offer_value = sum(q * v for q, v in zip(o, self.values))
+            # Calculate what opponent *kept* for themselves
+            opp_kept = [total - offer_amt for total, offer_amt in zip(self.counts, o)]
             
-            # Acceptance Logic:
-            # A. Offer meets our current strategic threshold
-            if offer_value >= current_threshold:
+            # Update history: Accumulate frequency of items opponent desires
+            for i, k in enumerate(opp_kept):
+                self.opp_kept_counts[i] += k
+            
+            offer_val_to_me = sum(q * v for q, v in zip(o, self.values))
+            
+            # --- Last Turn Survival Logic ---
+            # If I am Player 1 (Second Mover) and rounds_left == 1, this is the absolute final turn.
+            # If I make a counter-offer, the game ends with No Agreement (0 value).
+            # Therefore, I must accept ANY valid positive value (and arguably even 0 if that's all there is, 
+            # effectively "walking away" math-wise, but maximizing V > 0 is better).
+            if self.me == 1 and self.rounds_left == 1:
+                if offer_val_to_me > 0 or (offer_val_to_me == 0 and self.total_value == 0):
+                    return None
+            
+            # --- Standard Acceptance Logic ---
+            threshold = self._get_threshold()
+            if offer_val_to_me >= threshold:
                 self.rounds_left -= 1
                 return None
-            
-            # B. "Last Chance" Logic
-            # If I am the second player (me=1) and this is the last round,
-            # rejecting implies making a counter-offer which ends the game with no agreement.
-            # Therefore, we must accept any offer that provides a baseline fair value.
-            if self.me == 1 and self.rounds_left == 1:
-                if offer_value >= reservation_val:
-                    self.rounds_left -= 1
-                    return None
 
         # 2. Formulate Counter-Offer
-        # Filter bundles that meet the current threshold.
-        candidates = [b for b in self.sorted_bundles if b[0] >= current_threshold]
+        current_threshold = self._get_threshold()
         
+        # Filter bundles that satisfy my current threshold requirements
+        candidates = []
+        # Since sorted_bundles is sorted by value desc, we can iterate until fail
+        for val, bundle in self.sorted_bundles:
+            if val >= current_threshold:
+                candidates.append(bundle)
+            else:
+                break 
+        
+        # If threshold is too high for any bundle (unlikely unless threshold > total),
+        # fallback to max demand.
         if not candidates:
-            # Fallback to max value if threshold calculation drifts (unlikely)
-            best_bundle = self.sorted_bundles[0][2]
+            best_offer = list(self.counts)
         else:
-            # Strategy: To maximize agreement probability while respecting threshold,
-            # we choose the offers closest to the threshold (most generous to opponent 
-            # while still allowed by our current concession level).
+            # Among "satisfactory" deals for ME, pick the one best for THEM.
+            # Heuristic: Find bundle where items given to opponent match their historical demand "opp_kept_counts".
             
-            # The list is sorted High Value -> Low Value.
-            # The candidates at the end of the list are close to current_threshold.
-            target_val = candidates[-1][0]
+            best_offer = candidates[0]
+            best_score = -1.0
             
-            # Get all bundles providing exactly this value
-            best_deals_at_val = [b for b in candidates if b[0] == target_val]
-            
-            # Tie-breaker: Choose the one where we take the FEWEST physical items 
-            # (leaving max items for opponent).
-            best_bundle = min(best_deals_at_val, key=lambda x: x[1])[2]
+            for bundle_me in candidates:
+                # Calculate what opponent receives in this split
+                items_for_opp = [total - mine for total, mine in zip(self.counts, bundle_me)]
+                
+                # Dot product of (ItemsForOpp * OpponentInterestWeight)
+                score = sum(amt * weight for amt, weight in zip(items_for_opp, self.opp_kept_counts))
+                
+                if score > best_score:
+                    best_score = score
+                    best_offer = bundle_me
 
         self.rounds_left -= 1
-        return best_bundle
+        return list(best_offer)
+
+    def _get_threshold(self) -> int:
+        """
+        Calculates the minimum value I am willing to accept at this point in time.
+        Uses a concession curve that starts high and drops towards a fair split.
+        """
+        if self.max_rounds <= 1:
+            progress = 1.0
+        else:
+            # progress goes from 0.0 (start) to 1.0 (start of last round)
+            progress = (self.max_rounds - self.rounds_left) / (self.max_rounds - 1)
+        
+        # Clamp progress 0-1
+        progress = max(0.0, min(1.0, progress))
+        
+        # Strategy:
+        # Start: Ask for full Total Value ("Boulware" strategy anchor).
+        # End: Settle for slightly above 50% (Reservation Value).
+        # We don't want to go strictly to 50% too early to avoid exploitation, 
+        # but in the last round, we want to ensure a deal.
+        
+        start_val = self.total_value
+        # Reservation: 55% of total value, or half if total is small. 
+        # Ensuring we don't accidentally ask for > total on integer math is handled by Logic.
+        end_val = int(self.total_value * 0.55) 
+
+        # Linear interpolation
+        # More complex curves (e.g. cubic) can be used, but linear is robust for unknown opponents.
+        current_req = start_val - (start_val - end_val) * progress
+        
+        return int(current_req)

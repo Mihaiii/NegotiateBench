@@ -44,7 +44,7 @@ def save_solution(display_name: str, code: str) -> None:
 
     sanitized_display_name = sanitize(display_name)
     solutions_path = (
-        Path(__file__).parent / "solutions" / f"{sanitized_display_name}.py"
+        Path(__file__).parent.parent / "solutions" / f"{sanitized_display_name}.py"
     )
     with open(solutions_path, "w") as f:
         f.write(code)

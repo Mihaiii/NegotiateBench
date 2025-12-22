@@ -218,6 +218,11 @@ def get_algos(display_name, openrouter_name, current_code, samples):
         # Build user prompt with current code, error, and samples (if any)
         user_prompt = build_user_prompt(prompts, current_code, error, samples)
 
+        print("=" * 20)
+        print(f"{display_name}: {system_prompt=}")
+        print("-" * 20)
+        print(f"{display_name}: {user_prompt=}")
+        print("=" * 20)
         # Call OpenRouter
         response_text = call_openrouter(openrouter_name, system_prompt, user_prompt)
 
@@ -240,26 +245,10 @@ def get_algos(display_name, openrouter_name, current_code, samples):
             error = validation_error
             current_code = extracted_code
             print(f"Validation error: {error}")
-    else:
-        print(
-            f"Failed to get valid code for {display_name} after {max_attempts} attempts"
-        )
-        return None
+
+    print(f"Failed to get valid code for {display_name} after {max_attempts} attempts")
+    return None
 
 
 if __name__ == "__main__":
     main()
-    # setup_database()
-    # os.environ["MAX_SCENARIO_DATA"] = "4"
-    # os.environ["NUM_SAMPLES"] = "2"
-    # config_path = Path(__file__).parent / "tests" / "models2.yaml"
-    # with open(config_path, "r") as f:
-    #     config = yaml.safe_load(f)
-    # models = config.get("models", [])
-    # negotiation_data, total_target_worth = generate_negotiation_data()
-    # battle_results, battle_scenarios = run_battles(models, negotiation_data)
-    # print(negotiation_data)
-    # print("-" * 20)
-    # print(battle_results)
-    # print("-" * 20)
-    # print(battle_scenarios)

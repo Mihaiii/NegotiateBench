@@ -48,7 +48,7 @@ def get_top_model_latest_session():
 def get_samples(commit_hash):
     """
     Get all player_data records filtered by commit_hash.
-    Returns a list of dictionaries with id, model_name, player_number, data, and commit_hash.
+    Returns a list of dictionaries with id, model_name, opponent_model_name, data, and commit_hash.
     """
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL environment variable must be set")
@@ -59,7 +59,7 @@ def get_samples(commit_hash):
     try:
         cursor.execute(
             """
-            SELECT id, model_name, player_number, data, commit_hash
+            SELECT id, model_name, opponent_model_name, data, commit_hash
             FROM player_data
             WHERE commit_hash = %s;
             """,
@@ -70,7 +70,7 @@ def get_samples(commit_hash):
             {
                 "id": row[0],
                 "model_name": row[1],
-                "player_number": row[2],
+                "opponent_model_name": row[2],
                 "data": row[3],
                 "commit_hash": row[4],
             }
@@ -133,55 +133,18 @@ def save_battle_results(results: dict, max_possible_profit: int, commit_hash: st
         conn.close()
 
 
-def save_player_data(model_name: str, player_number: int, data: str, commit_hash: str):
+def save_battle_samples(battle_scenarios: dict, commit_hash: str):
     """
-    Save a single player_data record.
+    Save all battle scenarios to the database.
 
     Args:
-        model_name: The name of the losing model
-        player_number: 0 or 1, indicating which player position the loser was in
-        data: JSON string of the scenario data
-        commit_hash: The git commit hash
-    """
-    if not DATABASE_URL:
-        raise ValueError("DATABASE_URL environment variable must be set")
-
-    conn = psycopg2.connect(DATABASE_URL)
-    cursor = conn.cursor()
-
-    try:
-        cursor.execute(
-            """
-            INSERT INTO player_data (model_name, player_number, data, commit_hash)
-            VALUES (%s, %s, %s, %s);
-            """,
-            (model_name, player_number, data, commit_hash),
-        )
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        print(f"Failed to save player data: {e}")
-        raise
-    finally:
-        cursor.close()
-        conn.close()
-
-
-def save_winner_samples(winner_name: str, battle_scenarios: dict, commit_hash: str):
-    """
-    Save sample battle scenarios involving the winner.
-
-    Args:
-        winner_name: The name of the winning model
         battle_scenarios: Dictionary mapping (model_X, model_Y) tuple to list of scenario data.
             Each scenario contains:
             - 'scenario': the original scenario data
-            - 'agent_0': name of the model that was agent_0
-            - 'agent_1': name of the model that was agent_1
             - 'outcome': 'deal', 'no_deal', or error type
-            - 'profit_agent_0': profit achieved by agent_0
-            - 'profit_agent_1': profit achieved by agent_1
-            - 'turn_history': list of offers per round
+            - '{model_x}_profit': profit achieved by model_x
+            - '{model_y}_profit': profit achieved by model_y
+            - 'turn_history': list of offers per round with '{model_name}_offer' keys
         commit_hash: The git commit hash
     """
     import json
@@ -192,36 +155,21 @@ def save_winner_samples(winner_name: str, battle_scenarios: dict, commit_hash: s
     # Collect all records to insert
     records = []
     for (model_x, model_y), scenarios in battle_scenarios.items():
-        # Only process scenarios involving the winner
-        if winner_name not in (model_x, model_y):
-            continue
-
         for scenario_info in scenarios:
-            # Determine the loser (the model that is not the winner)
-            if scenario_info["agent_0"] == winner_name:
-                loser_name = scenario_info["agent_1"]
-                loser_player_number = 1
-            elif scenario_info["agent_1"] == winner_name:
-                loser_name = scenario_info["agent_0"]
-                loser_player_number = 0
-            else:
-                continue  # Winner not in this scenario (shouldn't happen)
-
             # Build the data to save - include all relevant info
             data = {
                 "scenario": scenario_info["scenario"],
-                "agent_0": scenario_info["agent_0"],
-                "agent_1": scenario_info["agent_1"],
                 "outcome": scenario_info["outcome"],
-                "profit_agent_0": scenario_info["profit_agent_0"],
-                "profit_agent_1": scenario_info["profit_agent_1"],
+                f"{model_x}_profit": scenario_info[f"{model_x}_profit"],
+                f"{model_y}_profit": scenario_info[f"{model_y}_profit"],
                 "turn_history": scenario_info["turn_history"],
             }
             data_json = json.dumps(data)
-            records.append((loser_name, loser_player_number, data_json, commit_hash))
+
+            records.append((model_x, model_y, data_json, commit_hash))
 
     if not records:
-        print(f"No battle scenarios found for {winner_name}")
+        print("No battle scenarios to save")
         return
 
     conn = psycopg2.connect(DATABASE_URL)
@@ -234,14 +182,14 @@ def save_winner_samples(winner_name: str, battle_scenarios: dict, commit_hash: s
         execute_values(
             cursor,
             """
-            INSERT INTO player_data (model_name, player_number, data, commit_hash)
+            INSERT INTO player_data (model_name, opponent_model_name, data, commit_hash)
             VALUES %s
             """,
             records,
         )
 
         conn.commit()
-        print(f"Saved {len(records)} battle samples for {winner_name} to database")
+        print(f"Saved {len(records)} battle samples to database")
     except Exception as e:
         conn.rollback()
         print(f"Failed to save battle samples: {e}")

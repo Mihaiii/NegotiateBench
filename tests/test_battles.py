@@ -89,15 +89,14 @@ class TestBattles:
         for key, scenarios in battle_scenarios.items():
             assert isinstance(key, tuple)
             assert len(key) == 2
+            model_x, model_y = key
             assert isinstance(scenarios, list)
 
             for scenario in scenarios:
                 assert "scenario" in scenario
-                assert "agent_0" in scenario
-                assert "agent_1" in scenario
                 assert "outcome" in scenario
-                assert "profit_agent_0" in scenario
-                assert "profit_agent_1" in scenario
+                assert f"{model_x}_profit" in scenario
+                assert f"{model_y}_profit" in scenario
                 assert "turn_history" in scenario
 
     def test_battle_scenarios_respects_num_samples(self, monkeypatch):
@@ -162,14 +161,15 @@ class TestBattles:
         battle_results, battle_scenarios = run_battles(models, data)
 
         for key, scenarios in battle_scenarios.items():
+            model_x, model_y = key
             for scenario in scenarios:
                 turn_history = scenario["turn_history"]
                 assert isinstance(turn_history, list)
 
                 for turn in turn_history:
                     assert "round" in turn
-                    assert "agent_0_offer" in turn
-                    assert "agent_1_offer" in turn
+                    assert f"{model_x}_offer" in turn
+                    assert f"{model_y}_offer" in turn
                     assert isinstance(turn["round"], int)
 
     def test_battle_scenarios_json_serializable(self, monkeypatch):

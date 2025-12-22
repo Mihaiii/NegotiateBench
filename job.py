@@ -9,7 +9,8 @@ import re
 import misc.git as git
 from misc.battlefield import validate_code, generate_negotiation_data, run_battles
 from misc.loaders import load_models, load_prompts, get_current_code
-from db.service import save_battle_results, save_winner_samples
+from db.service import save_battle_results, save_battle_samples
+from db.db_setup import setup_database
 
 # Load environment variables from .env file
 load_dotenv()
@@ -162,13 +163,13 @@ def main():
         )
         print(f"\nWinner: {winner_name}")
         # Save battle scenarios
-        save_winner_samples(winner_name, battle_scenarios, new_commit_hash)
+        save_battle_samples(battle_scenarios, new_commit_hash)
 
     except Exception as e:
-        print(f"Failed to run battles, push changes or save winner samples: {e}")
+        print(f"Failed to run battles, push changes or save battle samples: {e}")
         return
 
-    # Save results to database (only if save_winner_samples succeeded)
+    # Save results to database (only if save_battle_samples succeeded)
     save_battle_results(battle_results, max_possible_profit, new_commit_hash)
 
 
@@ -211,13 +212,14 @@ def get_algos(prompts, system_prompt, display_name, openrouter_name, current_cod
 
 
 if __name__ == "__main__":
+    setup_database()
     os.environ["MAX_NUM_DATA"] = "4"
-    os.environ["NUM_SAMPLES"] = "1"
+    os.environ["NUM_SAMPLES"] = "2"
     config_path = Path(__file__).parent / "tests" / "models2.yaml"
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
     models = config.get("models", [])
-    negotiation_data, max_possible_profit = generate_negotiation_data()
+    negotiation_data, total_target_worth = generate_negotiation_data()
     battle_results, battle_scenarios = run_battles(models, negotiation_data)
     print(negotiation_data)
     print("-" * 20)

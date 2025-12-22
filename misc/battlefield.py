@@ -177,7 +177,7 @@ def generate_negotiation_data():
     return data, total_target_worth
 
 
-def run_negotiation(agent_0, agent_1, counts, max_rounds):
+def run_negotiation(agent_0, agent_1, counts, max_rounds, name_0: str, name_1: str):
     """
     Run a negotiation session between two agents.
 
@@ -185,16 +185,18 @@ def run_negotiation(agent_0, agent_1, counts, max_rounds):
     - agent_0_items: list of items agent_0 gets (or None if no deal)
     - agent_1_items: list of items agent_1 gets (or None if no deal)
     - outcome: 'deal', 'no_deal', or 'error'
-    - turn_history: list of dicts with 'round', 'agent_0_offer', 'agent_1_offer' for each round
+    - turn_history: list of dicts with 'round', '{name_0}_offer', '{name_1}_offer' for each round
     """
     offer = None  # First offer starts as None
     turn_history = []
+    offer_key_0 = f"{name_0}_offer"
+    offer_key_1 = f"{name_1}_offer"
 
     for round_num in range(max_rounds):
         round_record = {
             "round": round_num + 1,
-            "agent_0_offer": None,
-            "agent_1_offer": None,
+            offer_key_0: None,
+            offer_key_1: None,
         }
 
         # Agent 0's turn
@@ -209,13 +211,13 @@ def run_negotiation(agent_0, agent_1, counts, max_rounds):
             # offer contains what agent_0 gets
             agent_0_items = offer
             agent_1_items = [counts[i] - offer[i] for i in range(len(counts))]
-            round_record["agent_0_offer"] = None  # Accepted
+            round_record[offer_key_0] = None  # Accepted
             turn_history.append(round_record)
             return agent_0_items, agent_1_items, "deal", turn_history
 
         if response_0 is not None:
             # Agent 0 made a counter-offer (what agent_0 wants for itself)
-            round_record["agent_0_offer"] = response_0
+            round_record[offer_key_0] = response_0
             # Convert to what agent_1 would get
             offer_for_agent_1 = [counts[i] - response_0[i] for i in range(len(counts))]
 
@@ -231,12 +233,12 @@ def run_negotiation(agent_0, agent_1, counts, max_rounds):
             # Agent 1 accepts agent 0's offer
             agent_0_items = response_0
             agent_1_items = [counts[i] - response_0[i] for i in range(len(counts))]
-            round_record["agent_1_offer"] = None  # Accepted
+            round_record[offer_key_1] = None  # Accepted
             turn_history.append(round_record)
             return agent_0_items, agent_1_items, "deal", turn_history
 
         # Agent 1 made a counter-offer (what agent_1 wants for itself)
-        round_record["agent_1_offer"] = response_1
+        round_record[offer_key_1] = response_1
         turn_history.append(round_record)
 
         # Convert to what agent_0 would get for next round
@@ -274,12 +276,10 @@ def run_battles(
             For each pair, stores up to num_samples scenarios, with num_samples // 2 where
             model_X is agent_0 and the rest where model_X is agent_1. Each scenario contains:
             - 'scenario': the original scenario data
-            - 'agent_0': name of the model that was agent_0
-            - 'agent_1': name of the model that was agent_1
             - 'outcome': 'deal', 'no_deal', or error type
-            - 'profit_agent_0': profit achieved by agent_0
-            - 'profit_agent_1': profit achieved by agent_1
-            - 'turn_history': list of offers per round
+            - '{model_x}_profit': profit achieved by model_x
+            - '{model_y}_profit': profit achieved by model_y
+            - 'turn_history': list of offers per round with '{model_name}_offer' keys
     """
     # Get num_samples from environment variable if available
     try:
@@ -338,7 +338,12 @@ def run_battles(
 
                     # Run the negotiation
                     items_0, items_1, outcome, turn_history = run_negotiation(
-                        agent_0, agent_1, counts, max_rounds
+                        agent_0,
+                        agent_1,
+                        counts,
+                        max_rounds,
+                        display_name_0,
+                        display_name_1,
                     )
 
                     # Calculate profits
@@ -368,25 +373,37 @@ def run_battles(
                     # model at canonical_key[0] is our reference model
                     # Check if current model_0 matches canonical_key[0]
                     ref_model = canonical_key[0]
+                    # Use ceiling division for as_agent_0 to ensure both positions
+                    # get at least 1 sample when num_samples >= 2
+                    # e.g., num_samples=3 -> as_agent_0=2, as_agent_1=1
+                    #       num_samples=2 -> as_agent_0=1, as_agent_1=1
+                    #       num_samples=1 -> as_agent_0=1, as_agent_1=0
+                    max_as_agent_0 = (num_samples + 1) // 2  # ceiling division
+                    max_as_agent_1 = num_samples // 2  # floor division
                     if display_name_0 == ref_model:
                         # ref_model is agent_0 in this battle
                         position_key = "as_agent_0"
-                        max_for_position = num_samples // 2
+                        max_for_position = max_as_agent_0
                     else:
                         # ref_model is agent_1 in this battle
                         position_key = "as_agent_1"
-                        max_for_position = num_samples - (num_samples // 2)
+                        max_for_position = max_as_agent_1
 
                     # Only add if we haven't reached the limit for this position
                     if scenario_counts[canonical_key][position_key] < max_for_position:
+                        # Transform scenario to use model names instead of player_0/player_1
+                        scenario_with_names = {
+                            "counts": scenario["counts"],
+                            "rounds": scenario["rounds"],
+                            f"{display_name_0}_values": scenario["player_0"],
+                            f"{display_name_1}_values": scenario["player_1"],
+                        }
                         battle_scenarios[canonical_key].append(
                             {
-                                "scenario": scenario,
-                                "agent_0": display_name_0,
-                                "agent_1": display_name_1,
+                                "scenario": scenario_with_names,
                                 "outcome": outcome,
-                                "profit_agent_0": profit_0,
-                                "profit_agent_1": profit_1,
+                                f"{display_name_0}_profit": profit_0,
+                                f"{display_name_1}_profit": profit_1,
                                 "turn_history": turn_history,
                             }
                         )

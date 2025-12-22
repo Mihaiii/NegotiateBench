@@ -126,7 +126,7 @@ def setup_database():
             CREATE TABLE IF NOT EXISTS player_data (
                 id BIGSERIAL PRIMARY KEY,
                 model_name TEXT NOT NULL,
-                player_number INTEGER NOT NULL CHECK (player_number IN (0, 1)),
+                opponent_model_name TEXT NOT NULL,
                 data TEXT,
                 commit_hash TEXT NOT NULL
             );
@@ -139,6 +139,34 @@ def setup_database():
             "CREATE INDEX IF NOT EXISTS idx_player_data_commit_hash ON player_data(commit_hash);"
         )
         print("Index on commit_hash created or already exists.")
+
+        # Enable RLS on player_data
+        cursor.execute("ALTER TABLE player_data ENABLE ROW LEVEL SECURITY;")
+        print("RLS enabled on player_data.")
+
+        # Create policy for player_data if it doesn't exist
+        cursor.execute(
+            """
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_policies
+                    WHERE tablename = 'player_data'
+                    AND policyname = 'public_read_only'
+                ) THEN
+                    CREATE POLICY public_read_only ON player_data
+                        FOR SELECT
+                        TO anon, authenticated
+                        USING (true);
+                END IF;
+            END $$;
+            """
+        )
+        print("Public read-only policy created for player_data or already exists.")
+
+        # Grant SELECT on player_data to anon and authenticated roles
+        cursor.execute("GRANT SELECT ON player_data TO anon, authenticated;")
+        print("Public read access granted to player_data table.")
 
         print("Database setup completed successfully!")
 

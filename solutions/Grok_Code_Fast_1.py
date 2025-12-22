@@ -6,8 +6,8 @@ class Agent:
         self.max_rounds = max_rounds
         self.me = me
         self.current_turn = 0
-        self.min_accept_initial = 0.65
-        self.min_accept_final = 0.4
+        self.min_accept_initial = 0.55
+        self.min_accept_final = 0.35
 
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.current_turn += 1
@@ -26,16 +26,14 @@ class Agent:
         return min_pct * self.total
 
     def generate_offer(self):
-        # Gradually reduce the minimum items left for partner as rounds progress
-        leave_factor = min(0.05 + (self.current_turn - 1) * 0.02, 0.15)
-        leave_num = max(int(len(self.counts) * leave_factor), 1)
+        leave_factor = max(0.05, 0.8 - (self.current_turn - 1) * 0.02)
+        leave_num = int(len(self.counts) * leave_factor + 0.5)
         items = sorted([(self.values[i], i) for i in range(len(self.counts))], reverse=True)
         offer = [0] * len(self.counts)
         for _, i in items:
             leave = 1 if self.values[i] == 0 else 0
             max_take = max(0, self.counts[i] - leave)
             offer[i] = max_take
-        # Adjust by reducing leave for high-value items
         for _, i in items[:leave_num]:
             if offer[i] >= 1:
                 offer[i] -= 1

@@ -1,68 +1,94 @@
 # -*- coding: utf-8 -*-
 """
-Improved bargaining agent for the haggling competition.
+A fast, deterministic bargaining agent.
 
-The agent:
-* knows its own valuations, the counts of each item type and that the opponent’s
-  total value equals our total value;
-* accepts offers that are "good enough" according to a dynamic threshold;
-* otherwise proposes a share that respects a linearly shrinking per‑type ratio
-  and guarantees that the opponent can still possibly reach the required total
-  value.
+The idea
+--------
+*  total = Σ count_i * value_i  (the same for both players)
+*  In turn t we know how many turns are left:   R = remaining_turns
+*  To keep the opponent from being forced below a
+   reasonable payoff we never keep more than
+
+          max_frac = R / (2 * max_rounds + 1)
+
+   of any item type.  (When R = 2·max_rounds this is ≈ 1,
+   when R = 0 it becomes 0 – we give everything away.)
+
+*  The best value we could still reach given this bound is
+   obtained by taking, for each type, up to
+   floor(max_frac * count_i) items, preferring the types
+   with the highest personal value.
+
+*  If the opponent’s offer gives us at least this value we accept;
+   otherwise we propose the greedy allocation described above.
+
+The agent never walks away, never returns an illegal list and
+conforms to the required `Agent` interface.
 """
 
 from typing import List, Optional
 
 
 class Agent:
-    """
-    Parameters
-    ----------
-    me : int
-        0 if we move first, 1 otherwise (unused – the strategy is symmetric).
-    counts : list[int]
-        Number of objects of each type.
-    values : list[int]
-        Our value for a single object of each type.
-    max_rounds : int
-        Maximum number of *rounds* (a round = two turns, one per player).
-    """
-
     def __init__(self, me: int, counts: List[int],
                  values: List[int], max_rounds: int) -> None:
-        self.me = me
-        self.counts = counts[:]          # immutable copy
+        """
+        Parameters
+        ----------
+        me : int
+            0 if we move first, 1 otherwise (unused – the strategy is symmetric).
+        counts : list[int]
+            Number of objects of each type.
+        values : list[int]
+            Our value for a single object of each type.
+        max_rounds : int
+            Maximum number of *rounds* (a round = two turns, one per player).
+        """
+        self.me = me                         # kept only for compatibility
+        self.counts = counts[:]              # immutable copy
         self.values = values[:]
         self.max_rounds = max_rounds
-        # each round yields two turns → total turns we may act
-        self.remaining_turns = max_rounds * 2
-        # total value of the whole set (equals opponent's total value)
+
+        # total value of the whole set (identical for the opponent)
         self.total = sum(c * v for c, v in zip(self.counts, self.values))
 
+        # number of *turns* we will ever be asked to act
+        self.remaining_turns = max_rounds * 2
+
     # -----------------------------------------------------------------
-    # Helper utilities
+    # Helper functions
     # -----------------------------------------------------------------
     def _value_of(self, share: List[int]) -> int:
         """Value of a share for us."""
         return sum(v * q for v, q in zip(self.values, share))
 
-    def _max_fraction(self, share: List[int]) -> float:
+    def _max_fraction_allowed(self) -> float:
         """
-        Largest fraction of any item type we keep.
-        Used for the guarantee calculation.
+        Maximum fraction of any item type we are allowed to keep in the
+        current turn.  The bound shrinks linearly to 0 when the deadline
+        is reached.
         """
-        return max(
-            (share[i] / self.counts[i]) if self.counts[i] else 0.0
-            for i in range(len(self.counts))
-        )
+        # denominator is (2*max_rounds + 1) – a tiny slack prevents
+        # division by zero when we are on the last turn.
+        return self.remaining_turns / (self.max_rounds * 2 + 1)
 
-    def _opponent_guarantee(self, share: List[int]) -> float:
+    def _best_future_value(self, max_frac: float) -> int:
         """
-        Minimal value the opponent can be forced to receive,
-        given our share, using the formula from the problem statement.
+        Greedy upper‑bound on the value we could still achieve if we keep
+        at most `max_frac` of each type.
         """
-        max_frac = self._max_fraction(share)
-        return self.total * (1.0 - max_frac)
+        # how many of each type we *could* keep
+        limits = [int(max_frac * c) for c in self.counts]
+
+        # take the most valuable items first
+        order = sorted(range(len(self.values)),
+                       key=lambda i: self.values[i],
+                       reverse=True)
+
+        value = 0
+        for i in order:
+            value += self.values[i] * limits[i]
+        return value
 
     # -----------------------------------------------------------------
     def offer(self, o: Optional[List[int]]) -> Optional[List[int]]:
@@ -72,8 +98,8 @@ class Agent:
         Parameters
         ----------
         o : list[int] | None
-            The opponent's last proposal (what we would receive).  ``None`` on the
-            very first turn.
+            The opponent's last proposal (what we would receive).  ``None``
+            on the very first turn.
 
         Returns
         -------
@@ -84,61 +110,48 @@ class Agent:
         # One turn is consumed.
         self.remaining_turns -= 1
 
-        # --------------------------------------------------------------
-        # 1)  Accept if the offer is good enough.
-        # --------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 1)  Decide whether to accept the opponent's offer.
+        # -----------------------------------------------------------------
         if o is not None:
             my_val = self._value_of(o)
 
-            # Dynamic acceptance threshold:
-            #   early rounds → greedy (70 % of total)
-            #   later rounds → relax to the safe 50 %
-            # Linear interpolation between 0.7 and 0.5 over the whole timeline.
-            progress = (self.max_rounds * 2 - self.remaining_turns) \
-                / (self.max_rounds * 2)
-            threshold = 0.5 + 0.2 * (1.0 - progress)   # 0.7 → 0.5
-            if my_val >= self.total * threshold:
+            # Upper bound on the value we could still reach later.
+            max_frac = self._max_fraction_allowed()
+            future_best = self._best_future_value(max_frac)
+
+            # Accept if the offer is at least as good as what we could still
+            # hope to obtain.
+            if my_val >= future_best:
                 return None
 
-        # --------------------------------------------------------------
-        # 2)  No acceptable offer – build a counter‑proposal.
-        # --------------------------------------------------------------
+            # As a safety net we also accept any offer that gives us
+            # at least half of the total value (the classic “fair
+            # split” benchmark).  This helps against opponents that
+            # quickly drop their demands.
+            if my_val >= self.total * 0.5:
+                return None
+
+        # -----------------------------------------------------------------
+        # 2)  Build a counter‑proposal.
+        # -----------------------------------------------------------------
         n = len(self.counts)
 
         # If this is our very last turn we concede everything.
         if self.remaining_turns == 0:
             return [0] * n
 
-        # Maximum proportion we may keep for each type.
-        # It shrinks linearly from ~1 down to 0.5 as we approach the deadline.
-        ratio = (self.remaining_turns) / (self.max_rounds * 2 + 1)
+        # Maximum fraction we may keep for each type in this turn.
+        max_frac = self._max_fraction_allowed()
+        limits = [int(max_frac * c) for c in self.counts]
 
-        # Start with the raw ratio limits.
-        limits = [int(ratio * c) for c in self.counts]
-
-        # Ensure the limits still allow the opponent to reach the required total.
-        # If the guarantee produced by the current limits exceeds the opponent's
-        # total value, we have to relax the most restrictive type(s).
-        while True:
-            provisional_share = limits[:]
-            guarantee = self._opponent_guarantee(provisional_share)
-            if guarantee <= self.total:
-                break
-            # Find the type with the *largest* fraction (the one causing the
-            # guarantee to be too high) and relax it by one unit.
-            idx = max(
-                range(n),
-                key=lambda i: (limits[i] / self.counts[i]) if self.counts[i] else -1
-            )
-            if limits[idx] == 0:
-                # Should never happen, but guard against infinite loops.
-                break
-            limits[idx] -= 1
-
-        # Greedy fill: take as many items as allowed, preferring higher‑valued types.
+        # Greedy allocation: take as many high‑valued items as the limits allow.
         order = sorted(range(n), key=lambda i: self.values[i], reverse=True)
         share = [0] * n
         for i in order:
             share[i] = limits[i]
 
+        # The constructed share is always feasible (share_i ≤ count_i) and
+        # respects the fairness bound, so the opponent always has a
+        # non‑negative guarantee.
         return share

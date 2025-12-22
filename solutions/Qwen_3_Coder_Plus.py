@@ -5,119 +5,116 @@ class Agent:
         self.values = values
         self.max_rounds = max_rounds
         self.rounds_elapsed = 0
+        self.total_value = sum(c * v for c, v in zip(counts, values))
         
-        # Calculate total value
-        self.total_value = sum(count * value for count, value in zip(counts, values))
-        
-        # Store opponent's offer history to try to infer their preferences
+        # Track opponent patterns and history
         self.opponent_history = []
         self.my_history = []
-        
-        # Variables for dynamic negotiation strategy
-        self.concession_rate = 1.0  # Start optimistic, become more concessive as rounds pass
-        self.min_acceptable_ratio = 0.4  # Lowest acceptable ratio of total value
-        self.best_offer_seen = 0  # Track best offer we could accept so far
+        self.acceptance_threshold = 0.4
+        self.negotiation_state = "initial"
 
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.rounds_elapsed += 1
         
-        # If opponent made an offer
+        # If opponent offered something
         if o is not None:
-            # Calculate value of the offered items for me
-            my_value_from_offer = sum(o[i] * self.values[i] for i in range(len(o)))
+            # Record the offer
+            self.opponent_history.append(o[:])
             
-            # Update history
-            if self.opponent_history and self.opponent_history[-1] == o:
-                # If the same offer is repeated, consider becoming more flexible
-                # because opponent might be inflexible
-                self.min_acceptable_ratio = max(0.3, self.min_acceptable_ratio - 0.05)
+            # Calculate value of opponent's offer to me
+            offer_value = sum(o[i] * self.values[i] for i in range(len(o)))
             
-            # Add to opponent history
-            self.opponent_history.append(o)
+            # Check if we should accept based on value and game state
+            offer_ratio = offer_value / self.total_value if self.total_value > 0 else 0
             
-            # Calculate how much of total value I'm getting
-            percentage_of_total = my_value_from_offer / self.total_value if self.total_value > 0 else 0
+            # Adjust acceptance threshold based on time remaining
+            time_factor = self.rounds_elapsed / self.max_rounds
+            threshold = self.acceptance_threshold + (0.8 - self.acceptance_threshold) * time_factor
             
-            # Dynamic acceptance based on:
-            # 1. How generous the offer is
-            # 2. How many rounds remain
-            # 3. Whether we're making progress
-            current_threshold = self.min_acceptable_ratio
+            # Detect if we're in a deadlock (same offer repeated)
+            if len(self.opponent_history) >= 2 and self.opponent_history[-1] == self.opponent_history[-2]:
+                # Be more flexible if getting same response
+                threshold = max(0.3, threshold * 0.8)
             
-            # Increase acceptance willingness as we get closer to the deadline
-            if self.max_rounds > 0:
-                remaining_ratio = (self.max_rounds - self.rounds_elapsed) / self.max_rounds
-                # If we have very few rounds left, lower our standards
-                if remaining_ratio < 0.2:  # In final 20% of rounds
-                    current_threshold =	max(0.1, current_threshold * 0.5)
-                elif remaining_ratio < 0.4:
-                    current_threshold = max(0.2, current_threshold * 0.75)
+            # If the offer is good enough relative to time and situation, accept
+            if offer_ratio >= threshold:
+                # Accept if good offer, or if low time remaining and we can't improve
+                if time_factor > 0.8 or offer_ratio > 0.7:
+                    return None
             
-            # Check if this offer contains more than the threshold
-            if percentage_of_total >= current_threshold:
-                # Consider if it's worth holding out for a better offer
-                if self.max_rounds <= self.rounds_elapsed or percentage_of_total > 0.7 or len(self.opponent_history) <= 2:
-                    return None  # Accept if it's good or last chance or early in game
+            # Check if opponent is being very generous
+            if offer_ratio > 0.8:
+                return None
+        
+        # Make a counter-offer if we're not accepting
+        my_offer = self.create_counteroffer(o)
+        
+        # Track our counter-offer
+        self.my_history.append(my_offer[:])
+        
+        return my_offer
+
+    def create_counteroffer(self, opponent_offer):
+        """Create a reasonable counter-offer based on our valuation and opponent's behavior"""
+        
+        # Start with asking for everything valuable to us
+        desired = [0] * len(self.counts)
+        for i in range(len(self.values)):
+            if self.values[i] > 0:
+                desired[i] = self.counts[i]
+        
+        # If there's an opponent offer, we need to adjust
+        if opponent_offer:
+            # Calculate what they value most highly and make some concession
+            opponent_valuation = [0] * len(self.counts)
             
-            # If offer is improving compared to the last one we rejected, be more flexible
-            if len(self.opponent_history) > 1:
-                prev_offer = self.opponent_history[-2]
-                prev_value = sum(prev_offer[i] * self.values[i] for i in range(len(prev_offer)))
+            # Estimate opponent's priority based on their offer
+            # This is our best guess of what they value
+            total_opp_value = sum(opponent_offer[i] * self.values[i] for i in range(len(opponent_offer)))
+            
+            # If we're at an impasse, make concessions
+            if len(self.opponent_history) >= 2 and len(self.my_history) >= 2:
+                # Check if recent offers are all the same (stuck in loop)
+                all_my_offers_equal = len(set(tuple(offer) for offer in self.my_history[-3:])) == 1
+                all_opp_offers_equal = len(set(tuple(offer) for offer in self.opponent_history[-3:])) == 1
                 
-                if my_value_from_offer > prev_value:  # Getting better offers
-                    # Be more willing to accept if we're seeing trend of improvement
-                    if percentage_of_total >= current_threshold * 0.8:
-                        return None
-            
-        # Make a counter-offer
-        # Start with what we want, but be adaptive
+                if all_my_offers_equal and all_opp_offers_equal:
+                    # Break the cycle by making concessions
+                    for i in range(len(self.counts)-1, -1, -1):  # Start from highest index
+                        # Give opponent something valuable to us but important to them
+                        if desired[i] > 0 and self.counts[i] > 1:
+                            desired[i] = max(0, desired[i] - 1)
+                            break
+
+        # Make sure our offer doesn't exceed available items
+        for i in range(len(desired)):
+            desired[i] = min(desired[i], self.counts[i])
         
-        # Calculate what a fair share might be
-        my_request = [0] * len(self.counts)
+        # Check if we have all high-value items, consider sharing lower-value ones to break deadlock
+        my_valuation = sum(desired[i] * self.values[i] for i in range(len(desired)))
         
-        # Based on our values, prioritize items we need most
-        # But consider what the opponent might be looking for
-        item_priorities = [(self.values[i], i) for i in range(len(self.values))]
-        item_priorities.sort(key=lambda x: x[0], reverse=True)
+        # If we're asking for too much and the opponent might feel we're unreasonable
+        items_i_keep = sum(desired[i] for i in range(len(desired)))
+        items_opponent_gets = sum(self.counts[i] - desired[i] for i in range(len(desired)))
         
-        remaining_counts = self.counts[:]
-        
-        # First, ensure we get items that are valuable to us
-        for _, idx in item_priorities:
-            if remaining_counts[idx] > 0:
-                if self.values[idx] > 0:  # Only take if we value the item
-                    my_request[idx] = remaining_counts[idx]
-                    remaining_counts[idx] = 0
+        # If I'm getting everything, I must share something unless I already have a very good deal
+        if items_opponent_gets == 0 and self.rounds_elapsed > 1:
+            # Give them at least one item of value to them (we'll estimate)
+            # In this case, give up something with lowest value to us
+            if self.values.count(0) == 0:  # All items have value
+                min_val_idx = min(range(len(self.values)), key=lambda k: self.values[k])
+                if self.values[min_val_idx] == min(self.values) and desired[min_val_idx] > 0:
+                    desired[min_val_idx] = max(0, desired[min_val_idx] - 1)
+            else:
+                # Give up an item worth 0 to us if any
+                for i in range(len(self.values)):
+                    if self.values[i] == 0 and desired[i] > 0:
+                        desired[i] = 0
+                        break
+                # If no 0-value items, give up a low-value one
                 else:
-                    my_request[idx] = 0
-        
-        # Check if our offer is reasonable - don't be greedy if that risks negotiation
-        my_valuation = sum(my_request[i] * self.values[i] for i in range(len(my_request)))
-        
-        # If we're about to ask for everything (and leaving opponent with nothing)
-        # adjust based on round and opponent behavior
-        items_for_opponent = [self.counts[i] - my_request[i] for i in range(len(self.counts))]
-        total_for_opponent = sum(items_for_opponent)
-        
-        # If we've asked for everything multiple times and gotten same offer back, compromise
-        if total_for_opponent == 0 and self.rounds_elapsed > 1:
-            # Give opponent at least something to break the deadlock
-            for i in range(len(self.counts) - 1, -1, -1):  # Try least valuable items first
-                if self.values[i] > 0 and my_request[i] > 0:
-                    my_request[i] -= 1
-                    break
-        
-        # Final checks to make sure our offer is valid and strategic
-        for i in range(len(my_request)):
-            my_request[i] = min(my_request[i], self.counts[i])
-            my_request[i] = max(my_request[i], 0)
-        
-        # If we have historical data showing the opponent settles for less, we can be bolder
-        if o is not None and self.rounds_elapsed < self.max_rounds:
-            # If the current round offer is significantly better than our greedy one,
-            # consider accepting instead of making another greedy counter-offer
-            offered_value = sum(o[i] * self.values[i] for i in range(len(o)))
-            if offered_value >= 0.8 * self.total_value:
-                return None  # Accept very good offers instead of being greedy
-            
-        return my_request
+                    min_val_idx = min(range(len(self.values)), key=lambda k: self.values[k])
+                    if desired[min_val_idx] > 0:
+                        desired[min_val_idx] = max(0, desired[min_val_idx] - 1)
+                        
+        return desired

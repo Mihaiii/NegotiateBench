@@ -82,17 +82,16 @@ user_prompt: |
   {error_section}
 
 current_code_section: |
-  Here is the current code:
+  Here is the current code that needs to be fixed or improved:
   ```python
   {current_code}
   ```
 
 error_section: |
-  The previous code produced the following error:
+  The previous code produced the following errors. Please fix the code.
   ```
   {error}
   ```
-  Please fix the code.
 
 samples: |
   # Negotiations examples

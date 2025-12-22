@@ -8,8 +8,8 @@ import os
 import re
 import misc.git as git
 from misc.battlefield import validate_code, generate_negotiation_data, run_battles
-from misc.loaders import load_models, load_prompts, get_current_code
-from db.service import save_battle_results, save_battle_samples
+from misc.loaders import load_models, load_prompts, get_current_code, get_code_example
+from db.service import save_battle_results, save_battle_samples, get_samples
 from db.db_setup import setup_database
 
 # Load environment variables from .env file
@@ -23,9 +23,12 @@ client = OpenAI(
 
 
 def build_user_prompt(
-    prompts: dict, current_code: str | None = None, error: str | None = None
+    prompts: dict,
+    current_code: str | None = None,
+    error: str | None = None,
+    samples_data: list | None = None,
 ) -> str:
-    """Build the user prompt, optionally including current code and error."""
+    """Build the user prompt, optionally including current code, error, and samples."""
     user_prompt_template = prompts.get("user_prompt", "")
 
     if current_code:
@@ -42,8 +45,18 @@ def build_user_prompt(
     else:
         error_section = ""
 
+    if samples_data:
+        samples_template = prompts.get("samples", "")
+        samples = samples_template.format(
+            samples_data=json.dumps(samples_data, indent=2)
+        )
+    else:
+        samples = ""
+
     return user_prompt_template.format(
-        current_code_section=current_code_section, error_section=error_section
+        current_code_section=current_code_section,
+        error_section=error_section,
+        samples=samples,
     )
 
 
@@ -93,6 +106,10 @@ def main():
     # We need the commit hash in order to get the samples against the top performing model from the db.
     commit_hash = git.pull()
 
+    # Get samples from the database for this commit
+    samples = get_samples(commit_hash)
+    print(f"Retrieved {len(samples)} samples from database for commit {commit_hash}")
+
     # Load models from config
     models: list[dict] = load_models()
     print(f"Loaded models: {models}")
@@ -105,10 +122,6 @@ def main():
 
     # Identify top model
     top_model = get_top_model_latest_session()
-
-    # Load prompts
-    prompts = load_prompts()
-    system_prompt = prompts.get("system_prompt", "")
 
     # Iterate through models and call OpenRouter
     for model in models.copy():
@@ -124,9 +137,7 @@ def main():
         # Get existing code if any
         current_code = get_current_code(display_name)
 
-        new_code = get_algos(
-            prompts, system_prompt, display_name, openrouter_name, current_code
-        )
+        new_code = get_algos(display_name, openrouter_name, current_code, samples)
         if not new_code:
             models.remove(model)
             continue
@@ -173,14 +184,25 @@ def main():
     save_battle_results(battle_results, max_possible_profit, new_commit_hash)
 
 
-def get_algos(prompts, system_prompt, display_name, openrouter_name, current_code):
+def get_algos(display_name, openrouter_name, current_code, samples):
+
+    prompts = load_prompts()
+    system_prompt_template = prompts.get("system_prompt", "")
+    problem_description = prompts.get("problem_description", "")
+    code_example = get_code_example()
+    system_prompt = system_prompt_template.format(
+        model_name=display_name,
+        problem_description=problem_description,
+        code_example=code_example,
+    )
+
     error = None
     max_attempts = 3
     for attempt in range(max_attempts):
         print(f"Attempt {attempt + 1}/{max_attempts}")
 
-        # Build user prompt with current code and error (if any)
-        user_prompt = build_user_prompt(prompts, current_code, error)
+        # Build user prompt with current code, error, and samples (if any)
+        user_prompt = build_user_prompt(prompts, current_code, error, samples)
 
         # Call OpenRouter
         response_text = call_openrouter(openrouter_name, system_prompt, user_prompt)
@@ -212,17 +234,18 @@ def get_algos(prompts, system_prompt, display_name, openrouter_name, current_cod
 
 
 if __name__ == "__main__":
-    setup_database()
-    os.environ["MAX_NUM_DATA"] = "4"
-    os.environ["NUM_SAMPLES"] = "2"
-    config_path = Path(__file__).parent / "tests" / "models2.yaml"
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-    models = config.get("models", [])
-    negotiation_data, total_target_worth = generate_negotiation_data()
-    battle_results, battle_scenarios = run_battles(models, negotiation_data)
-    print(negotiation_data)
-    print("-" * 20)
-    print(battle_results)
-    print("-" * 20)
-    print(battle_scenarios)
+    main()
+    # setup_database()
+    # os.environ["MAX_SCENARIO_DATA"] = "4"
+    # os.environ["NUM_SAMPLES"] = "2"
+    # config_path = Path(__file__).parent / "tests" / "models2.yaml"
+    # with open(config_path, "r") as f:
+    #     config = yaml.safe_load(f)
+    # models = config.get("models", [])
+    # negotiation_data, total_target_worth = generate_negotiation_data()
+    # battle_results, battle_scenarios = run_battles(models, negotiation_data)
+    # print(negotiation_data)
+    # print("-" * 20)
+    # print(battle_results)
+    # print("-" * 20)
+    # print(battle_scenarios)

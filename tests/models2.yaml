@@ -3,3 +3,5 @@ models:
     openrouter_name: dummy/dummy-model:free
   - display_name: example2
     openrouter_name: dummy/dummy-model2:free
+  - display_name: example3
+    openrouter_name: dummy/dummy-model3:free

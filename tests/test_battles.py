@@ -17,7 +17,7 @@ class TestBattles:
     @pytest.fixture(autouse=True)
     def setup(self, monkeypatch):
         """Setup test environment variables and paths."""
-        monkeypatch.setenv("MAX_NUM_DATA", "10")
+        monkeypatch.setenv("MAX_SCENARIO_DATA", "10")
         monkeypatch.setenv("NUM_SAMPLES", "4")
 
         # Store original solutions path lookup
@@ -35,7 +35,7 @@ class TestBattles:
         data, total_target_worth = generate_negotiation_data()
 
         assert len(data) > 0
-        assert len(data) <= 10  # MAX_NUM_DATA is set to 10
+        assert len(data) <= 10  # MAX_SCENARIO_DATA is set to 10
         assert total_target_worth > 0
 
         for scenario in data:

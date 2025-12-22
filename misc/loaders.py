@@ -25,3 +25,10 @@ def get_current_code(display_name: str) -> str | None:
         with open(solutions_path, "r") as f:
             return f.read()
     return None
+
+
+def get_code_example() -> str:
+    """Get the code example from solutions/example.py."""
+    example_path = Path(__file__).parent.parent / "solutions" / "example.py"
+    with open(example_path, "r") as f:
+        return f.read()

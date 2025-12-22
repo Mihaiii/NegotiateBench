@@ -1,5 +1,5 @@
 class Agent:
-    def __init__(self, me, counts, values, max_rounds):
+    def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
         self.counts = counts
         self.values = values
         self.rounds = max_rounds
@@ -7,7 +7,7 @@ class Agent:
         for i in range(len(counts)):
             self.total += counts[i] * values[i]
 
-    def offer(self, o):
+    def offer(self, o: list[int] | None) -> list[int] | None:
         self.rounds -= 1
         if o:
             sum_val = 0

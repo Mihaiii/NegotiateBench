@@ -20,7 +20,7 @@ if __name__ == "__main__":
     while True:
         start = time.time()
 
-        job.generate_negotiation_data(2)
+        job.main()
 
         elapsed = time.time() - start
         remaining = max(0, sleep_seconds - elapsed)

@@ -83,11 +83,11 @@ def generate_negotiation_data():
         - total_target_worth: sum of all scenario worths (same for all models)
     """
 
-    # Get max_num_data from environment variable, default to 20
+    # Get max_scenario_data from environment variable, default to 20
     try:
-        max_num_data = int(os.getenv("MAX_NUM_DATA", "20"))
+        max_scenario_data = int(os.getenv("MAX_SCENARIO_DATA", "20"))
     except ValueError:
-        max_num_data = 20
+        max_scenario_data = 20
 
     def generate_player_values(counts, target_worth):
         """Generate values list that sums to target_worth when multiplied with counts."""
@@ -141,7 +141,7 @@ def generate_negotiation_data():
     total_target_worth = 0
     target_worths = [32, 64, 128]
 
-    for _ in range(max_num_data):
+    for _ in range(max_scenario_data):
         # Random length between 2 and 10
         length = random.randint(2, 10)
 
@@ -206,20 +206,24 @@ def run_negotiation(agent_0, agent_1, counts, max_rounds, name_0: str, name_1: s
             print(f"Agent 0 error: {e}")
             return None, None, "error_agent_0", turn_history
 
-        if response_0 is None and offer is not None:
-            # Agent 0 accepts agent 1's offer
-            # offer contains what agent_0 gets
-            agent_0_items = offer
-            agent_1_items = [counts[i] - offer[i] for i in range(len(counts))]
-            round_record[offer_key_0] = None  # Accepted
-            turn_history.append(round_record)
-            return agent_0_items, agent_1_items, "deal", turn_history
+        if response_0 is None:
+            if offer is not None:
+                # Agent 0 accepts agent 1's offer
+                # offer contains what agent_0 gets
+                agent_0_items = offer
+                agent_1_items = [counts[i] - offer[i] for i in range(len(counts))]
+                round_record[offer_key_0] = None  # Accepted
+                turn_history.append(round_record)
+                return agent_0_items, agent_1_items, "deal", turn_history
+            else:
+                # Agent 0 returned None on the first round (invalid - must make an offer)
+                turn_history.append(round_record)
+                return None, None, "error_agent_0", turn_history
 
-        if response_0 is not None:
-            # Agent 0 made a counter-offer (what agent_0 wants for itself)
-            round_record[offer_key_0] = response_0
-            # Convert to what agent_1 would get
-            offer_for_agent_1 = [counts[i] - response_0[i] for i in range(len(counts))]
+        # Agent 0 made a counter-offer (what agent_0 wants for itself)
+        round_record[offer_key_0] = response_0
+        # Convert to what agent_1 would get
+        offer_for_agent_1 = [counts[i] - response_0[i] for i in range(len(counts))]
 
         # Agent 1's turn
         try:

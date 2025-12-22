@@ -1,38 +1,50 @@
 class Agent:
     def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
         self.me = me
-        self.counts = counts.copy()
-        self.values = values.copy()
-        self.total = sum(c * v for c, v in zip(self.counts, self.values))
+        self.counts = counts[:]
+        self.values = values[:]
+        self.total = sum(c * v for c, v in zip(counts, values))
         self.max_rounds = max_rounds
-        self.my_turns_made = 0
-        self.last_proposal = None
+        self.turns_made = 0
+        self.opp_offers = []
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        self.my_turns_made += 1
+        self.turns_made += 1
+        n = len(self.counts)
         max_turns = max(1, self.max_rounds)
-        progress = min(1.0, (self.my_turns_made - 1) / (max_turns - 1))
+        progress = min(1.0, (self.turns_made - 1) / (max_turns - 1))
 
         if o is not None:
-            incoming_val = sum(self.values[i] * o[i] for i in range(len(self.values)))
-            accept_threshold = self.total * (0.7 - 0.5 * progress)
-            if incoming_val >= accept_threshold or (progress >= 0.95 and incoming_val > 0):
+            self.opp_offers.append(o[:])
+            our_val = sum(self.values[i] * o[i] for i in range(n))
+            thresh = self.total * (0.75 - 0.65 * progress)
+            if our_val >= thresh or (progress >= 0.8 and our_val > 0):
                 return None
 
-        # Generate proposal
-        if self.last_proposal is None or o is None:
-            # Greedy initial proposal
-            proposal = [self.counts[i] if self.values[i] > 0 else 0 for i in range(len(self.counts))]
-        else:
-            # Weighted average towards opponent's proposal
-            bias = 0.8 * (1 - progress) + 0.4 * progress
-            proposal = []
-            for i in range(len(self.counts)):
-                me_share = self.last_proposal[i]
-                opp_offer_share = o[i]
-                share = int(bias * me_share + (1 - bias) * opp_offer_share)
-                share = max(0, min(self.counts[i], share))
-                proposal.append(share)
+        if len(self.opp_offers) == 0:
+            return [self.counts[i] if self.values[i] > 0 else 0 for i in range(n)]
 
-        self.last_proposal = proposal[:]
-        return proposal
+        avg_rel_keep = [0.0] * n
+        num_off = len(self.opp_offers)
+        for oo in self.opp_offers:
+            for i in range(n):
+                dem = self.counts[i] - oo[i]
+                rel = dem / self.counts[i] if self.counts[i] > 0 else 0.0
+                avg_rel_keep[i] += rel
+        for i in range(n):
+            avg_rel_keep[i] /= num_off
+
+        total_avg_demand_obj = sum(avg_rel_keep[j] * self.counts[j] for j in range(n))
+        if total_avg_demand_obj < 1e-6:
+            return [self.counts[i] if self.values[i] > 0 else 0 for i in range(n)]
+
+        mu = self.total / total_avg_demand_obj
+        prop = []
+        for i in range(n):
+            est_opp_v = mu * avg_rel_keep[i]
+            denom = self.values[i] + est_opp_v + 1e-9
+            frac = self.values[i] / denom
+            s = round(frac * self.counts[i])
+            s = max(0, min(self.counts[i], s))
+            prop.append(s)
+        return prop

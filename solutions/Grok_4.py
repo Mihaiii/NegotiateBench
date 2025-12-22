@@ -34,28 +34,61 @@ class Agent:
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn += 1
         remaining = self.max_rounds - self.turn + 1
-        min_accept = 0 if remaining == 1 else self.V * remaining / (self.max_rounds + 1)
         if o is not None:
             self.history_partner_offers.append(o)
             u = self.utility(o)
-            if u >= min_accept:
-                return None
-        # make offer
+            if remaining > 1:
+                min_accept = self.V * remaining / (self.max_rounds + 1)
+                if u >= min_accept:
+                    return None
+            else:
+                if u > 0:
+                    return None
+                elif self.me == 1:
+                    return None  # accept even if 0, same as not
+
+        # compute estimated_p
         if not self.history_partner_offers:
             estimated_p = [self.default_p] * self.n_types
         else:
-            last_o = self.history_partner_offers[-1]
             prop = [0.0] * self.n_types
-            denom = 0.0
+            num_hist = len(self.history_partner_offers)
+            for past_o in self.history_partner_offers:
+                for i in range(self.n_types):
+                    c = self.counts[i]
+                    if c > 0:
+                        f = past_o[i] / c
+                        prop[i] += 1 - f
             for i in range(self.n_types):
-                c = self.counts[i]
-                if c == 0:
-                    prop[i] = 0
-                    continue
-                f = last_o[i] / c
-                prop[i] = 1 - f + 1e-6
-                denom += prop[i] * c
-            scale = self.V / denom
-            estimated_p = [prop[i] * scale for i in range(self.n_types)]
-        prop_offer = self.compute_offer(estimated_p)
-        return prop_offer
+                if self.counts[i] > 0:
+                    prop[i] /= num_hist
+                prop[i] += 1e-6
+            denom = sum(prop[i] * self.counts[i] for i in range(self.n_types))
+            if denom == 0:
+                estimated_p = [0.0] * self.n_types
+            else:
+                scale = self.V / denom
+                estimated_p = [prop[i] * scale for i in range(self.n_types)]
+
+        # concession
+        concession = (self.turn - 1) / (self.max_rounds - 1) if self.max_rounds > 1 else 0.0
+        estimated_p = [estimated_p[i] * (1 + concession) for i in range(self.n_types)]
+
+        if remaining == 1 and self.me == 0:
+            # greedy offer for last counter
+            offer = [self.counts[i] if self.values[i] > 0 else 0 for i in range(self.n_types)]
+            opponent_u = sum(estimated_p[i] * (self.counts[i] - offer[i]) for i in range(self.n_types))
+            if opponent_u <= 0:
+                candidates = []
+                for i in range(self.n_types):
+                    if estimated_p[i] > 0 and offer[i] > 0:
+                        candidates.append((self.values[i], -estimated_p[i], i))
+                if candidates:
+                    candidates.sort()
+                    best_i = candidates[0][2]
+                    offer[best_i] -= 1
+            return offer
+        else:
+            # normal offer
+            offer = self.compute_offer(estimated_p)
+            return offer

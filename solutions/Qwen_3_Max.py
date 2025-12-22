@@ -4,114 +4,141 @@ class Agent:
         self.counts = counts
         self.values = values
         self.max_rounds = max_rounds
-        self.current_round = 0
-        
-        # Calculate total value for self
         self.total_value = sum(c * v for c, v in zip(counts, values))
-        
-        # Generate all possible allocations (what I get) - but only if feasible
-        # Since the state space might be large, we'll use a greedy approach instead
-        # We'll focus on high-value items first
+        self.round = 0
+        self.opponent_offers = []
         
     def _calculate_value(self, allocation: list[int]) -> int:
         """Calculate the value of an allocation to self."""
         return sum(a * v for a, v in zip(allocation, self.values))
     
     def _is_valid_allocation(self, allocation: list[int]) -> bool:
-        """Check if allocation is valid (non-negative and doesn't exceed counts)."""
+        """Check if allocation is valid."""
         return all(0 <= a <= c for a, c in zip(allocation, self.counts))
     
-    def _get_greedy_demand(self, min_value: int) -> list[int]:
-        """Get a greedy allocation that achieves at least min_value."""
-        # Start with nothing
+    def _get_my_demand_allocation(self, target_value: int) -> list[int]:
+        """Get allocation that achieves target_value by taking highest value items first."""
         allocation = [0] * len(self.counts)
         current_value = 0
         
-        # Create list of (value_per_item, item_index) for items with positive value
+        # Sort items by value descending
         valuable_items = [(self.values[i], i) for i in range(len(self.values)) if self.values[i] > 0]
-        # Sort by value descending (greedy: take highest value items first)
         valuable_items.sort(reverse=True)
         
-        # Try to add items starting from highest value
         for value_per_item, item_idx in valuable_items:
-            if current_value >= min_value:
+            if current_value >= target_value:
                 break
-            # Add as many as needed/available
-            needed_value = min_value - current_value
-            needed_items = (needed_value + value_per_item - 1) // value_per_item  # ceiling division
+            # Take as many as needed
+            needed_value = target_value - current_value
+            needed_items = (needed_value + value_per_item - 1) // value_per_item
             can_take = min(needed_items, self.counts[item_idx])
             allocation[item_idx] = can_take
             current_value += can_take * value_per_item
         
-        # If we still haven't reached min_value, take everything valuable
-        if current_value < min_value:
+        # If still not enough, take all valuable items
+        if current_value < target_value:
             for i, value in enumerate(self.values):
                 if value > 0:
                     allocation[i] = self.counts[i]
-        
+                    
         return allocation
     
-    def _get_conservative_offer(self) -> list[int]:
-        """Get a more reasonable offer that leaves something for the opponent."""
+    def _estimate_opponent_valuation(self) -> list[int]:
+        """Estimate opponent's valuations based on their offers."""
+        if not self.opponent_offers:
+            # No data, assume uniform or inverse correlation
+            return [1 if v == 0 else 0 for v in self.values]
+        
+        # Simple estimation: if opponent consistently offers us few of an item type,
+        # they likely value it highly
+        estimated_values = [0] * len(self.counts)
+        
+        for offer in self.opponent_offers:
+            for i in range(len(self.counts)):
+                # If they offer us few items of type i, they probably want it
+                offered_to_us = offer[i]
+                total_available = self.counts[i]
+                they_keep = total_available - offered_to_us
+                # Higher they_keep suggests higher value to them
+                estimated_values[i] += they_keep
+        
+        # Normalize to reasonable range
+        if max(estimated_values) > 0:
+            max_val = max(estimated_values)
+            estimated_values = [int((v / max_val) * 10) if max_val > 0 else 0 for v in estimated_values]
+        
+        return estimated_values
+    
+    def _create_reasonable_offer(self, opponent_values: list[int]) -> list[int]:
+        """Create an offer that gives opponent items they likely value."""
         allocation = [0] * len(self.counts)
         
-        # Take all items that are worthless to me (give them to opponent)
-        # Take only what I need to get a good deal
-        valuable_items = [(self.values[i], i) for i in range(len(self.values)) if self.values[i] > 0]
-        valuable_items.sort(reverse=True)
-        
-        # Calculate target value based on remaining rounds
-        rounds_remaining = self.max_rounds - self.current_round
-        if rounds_remaining <= 1:
-            # Last round, be more aggressive
-            target_value = self.total_value * 0.7
-        elif rounds_remaining <= 2:
-            target_value = self.total_value * 0.6
-        else:
-            target_value = self.total_value * 0.55
-        
-        current_value = 0
-        for value_per_item, item_idx in valuable_items:
-            if current_value >= target_value:
-                break
-            # Take most of the items but leave some for opponent to make deal acceptable
-            available = self.counts[item_idx]
-            if available <= 2:
-                take = available  # if few items, take all
+        # For each item type, decide how much to take
+        for i in range(len(self.counts)):
+            my_value = self.values[i]
+            opp_value = opponent_values[i]
+            
+            if my_value == 0 and opp_value > 0:
+                # I don't value it, they do - give it all to them
+                allocation[i] = 0
+            elif my_value > 0 and opp_value == 0:
+                # I value it, they don't - take it all
+                allocation[i] = self.counts[i]
+            elif my_value > 0 and opp_value > 0:
+                # Both value it - split reasonably
+                if my_value >= opp_value:
+                    # I value it more, take majority
+                    allocation[i] = self.counts[i]
+                else:
+                    # They value it more, take minority or none
+                    allocation[i] = max(0, self.counts[i] // 2)
             else:
-                take = max(1, available - 1)  # leave at least 1 if possible
-            allocation[item_idx] = take
-            current_value += take * value_per_item
-        
+                # Neither values it - take half
+                allocation[i] = self.counts[i] // 2
+                
         return allocation
     
+    def _get_acceptance_threshold(self, rounds_remaining: int) -> float:
+        """Determine minimum acceptable value based on rounds remaining."""
+        if rounds_remaining == 1:
+            # Last chance - accept almost anything
+            return 0.3
+        elif rounds_remaining <= 2:
+            return 0.4
+        elif rounds_remaining <= 4:
+            return 0.45
+        else:
+            return 0.5
+    
     def offer(self, o: list[int] | None) -> list[int] | None:
-        self.current_round += 1
-        rounds_remaining = self.max_rounds - self.current_round + 1
+        self.round += 1
+        rounds_remaining = self.max_rounds - self.round + 1
         
-        # If this is a counter-offer from opponent
+        # If opponent made an offer, consider accepting
         if o is not None:
-            # Check if we should accept
+            self.opponent_offers.append(o)
             offer_value = self._calculate_value(o)
+            threshold = self._get_acceptance_threshold(rounds_remaining)
             
-            # Determine minimum acceptable value based on rounds remaining
-            if rounds_remaining <= 1:  # This is the last chance to accept
-                min_acceptable = self.total_value * 0.4
-            elif rounds_remaining <= 2:
-                min_acceptable = self.total_value * 0.45
-            else:
-                min_acceptable = self.total_value * 0.5
-            
-            if offer_value >= min_acceptable:
-                return None  # Accept the offer
+            if offer_value >= threshold * self.total_value:
+                return None  # Accept
         
         # Make a counter-offer
-        if rounds_remaining <= 1:
-            # Last round - be aggressive, demand high value
-            return self._get_greedy_demand(int(self.total_value * 0.7))
-        elif rounds_remaining <= 2:
-            # Second to last round - still somewhat aggressive
-            return self._get_greedy_demand(int(self.total_value * 0.6))
-        else:
-            # Early rounds - be more reasonable to encourage agreement
-            return self._get_conservative_offer()
+        opponent_values = self._estimate_opponent_valuation()
+        reasonable_offer = self._create_reasonable_offer(opponent_values)
+        
+        # Ensure our offer has reasonable value to us
+        current_value = self._calculate_value(reasonable_offer)
+        target_value = self.total_value * self._get_acceptance_threshold(rounds_remaining - 1)
+        
+        if current_value < target_value:
+            # Boost our offer to meet minimum target
+            reasonable_offer = self._get_my_demand_allocation(int(target_value))
+        
+        # Final validation
+        if not self._is_valid_allocation(reasonable_offer):
+            # Fallback: take all valuable items
+            reasonable_offer = [self.counts[i] if self.values[i] > 0 else 0 
+                              for i in range(len(self.counts))]
+        
+        return reasonable_offer

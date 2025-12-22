@@ -168,8 +168,8 @@ class TestBattles:
 
                 for turn in turn_history:
                     assert "round" in turn
-                    assert f"{model_x}_offer" in turn
-                    assert f"{model_y}_offer" in turn
+                    assert f"{model_x} offer" in turn
+                    assert f"{model_y} offer" in turn
                     assert isinstance(turn["round"], int)
 
     def test_battle_scenarios_json_serializable(self, monkeypatch):

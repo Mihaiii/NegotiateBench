@@ -1,28 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-A simple haggling agent.
+Improved haggling agent.
 
-The agent follows a very light‑weight “good‑enough” strategy:
+The strategy is based on two ideas:
 
-* It keeps a decreasing acceptance threshold.  In the first turn the
-  threshold is 60 % of the total value of all items (according to the
-  agent’s own valuation).  After each turn the threshold is lowered
-  by a small step (5 % of the total).  This makes the agent more
-  willing to accept later offers, which is important because the
-  negotiation has a hard deadline (max_rounds).
+1. **Dynamic concession schedule** – we start by demanding a
+   large share of the total value (≈80 %) and linearly relax the
+   requirement to the fair 50 % by the last round.  This gives the
+   opponent enough incentive to accept early offers while still
+   protecting our own profit.
 
-* When the opponent makes an offer, the agent evaluates the value
-  of the bundle it would receive.  If that value meets the current
-  threshold the offer is accepted (the method returns ``None``).
+2. **Very light opponent modelling** – from the opponent's past
+   offers we infer which item types they tend to keep (i.e. they
+   probably value them highly).  When we build a counter‑offer we
+   deliberately leave those items for the opponent, which raises the
+   chance that the opponent will accept our proposal.
 
-* If the offer is not good enough the agent makes a counter‑offer.
-  The counter‑offer is built greedily: the agent takes as many items
-  as possible from the most valuable type first, then the next most
-  valuable type, and so on, until it reaches (or exceeds) the current
-  threshold.  Items that have zero value are never requested.
-
-The algorithm uses only the standard library and runs in well under
-the 5‑second per‑turn limit.
+The code uses only the Python standard library, respects the
+5‑second turn limit and follows the required ``Agent`` API.
 """
 
 from __future__ import annotations
@@ -36,83 +31,132 @@ class Agent:
     Parameters
     ----------
     me : int
-        0 if the agent moves first, 1 otherwise (not used by the simple
-        strategy but kept for API compatibility).
+        0 if we move first, 1 otherwise (kept for API compatibility).
     counts : list[int]
         Number of objects of each type.
     values : list[int]
-        Agent's valuation for a single object of each type.
+        Our per‑item valuation.
     max_rounds : int
         Maximum number of *rounds* (a round = two turns).
     """
 
-    def __init__(self, me: int, counts: List[int], values: List[int], max_rounds: int):
+    def __init__(self, me: int, counts: List[int],
+                 values: List[int], max_rounds: int) -> None:
         self.me = me
-        self.counts = counts[:]          # total stock, never modified
-        self.values = values[:]          # agent's per‑item values
+        self.total_counts = counts[:]          # never mutated
+        self.values = values[:]
         self.max_rounds = max_rounds
 
         # total value of everything according to us
-        self.total_value = sum(c * v for c, v in zip(self.counts, self.values))
+        self.total_value = sum(c * v for c, v in zip(self.total_counts,
+                                                     self.values))
 
-        # acceptance threshold starts at 60 % of the total value and will
-        # be lowered by 5 % of the total after each turn.
-        self.threshold = int(0.60 * self.total_value)
-        self.decrement = int(0.05 * self.total_value)
+        # we will count how many of our own turns have been played
+        self.turns_used = 0                     # each call to offer == one turn
 
-        # how many turns have we already taken (used only to stop the
-        # decrement from making the threshold negative)
-        self.turns_used = 0
+        # store opponent offers to obtain a very cheap estimate of their
+        # preferences (how many of each type they tend to keep)
+        self.opponent_history: List[List[int]] = []
 
-    # --------------------------------------------------------------------- #
-    # Helper methods
-    # --------------------------------------------------------------------- #
+        # pre‑compute the order of item types by our value (high → low)
+        self.value_rank = sorted(
+            range(len(self.values)),
+            key=lambda i: self.values[i],
+            reverse=True,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Helper utilities
+    # ------------------------------------------------------------------ #
     def _value_of_bundle(self, bundle: List[int]) -> int:
-        """Return the agent's value for a given bundle."""
+        """Return our valuation for a given bundle."""
         return sum(b * v for b, v in zip(bundle, self.values))
 
-    def _make_greedy_offer(self) -> List[int]:
+    def _current_target(self) -> int:
         """
-        Build a bundle that (approximately) reaches the current threshold.
-        The algorithm picks items of highest value first.
+        Desired minimum value for the current turn.
+
+        Starts around 80 % of the total value and linearly declines
+        to 50 % (the fair split) by the final round.
         """
-        target = self.threshold
-        offer = [0] * len(self.counts)
+        # how many of *our* turns are left?
+        # each round contains two turns, therefore max_turns = 2 * max_rounds
+        max_turns = self.max_rounds * 2
+        turns_left = max_turns - self.turns_used
 
-        # indices sorted by value descending
-        indices = sorted(range(len(self.values)),
-                         key=lambda i: self.values[i],
-                         reverse=True)
+        # linear interpolation: 0.80 → 0.50
+        fraction = 0.5 + 0.3 * (turns_left / max_turns)   # 0.8 at start, 0.5 at end
+        return int(self.total_value * fraction)
 
-        # greedy allocation
+    def _estimate_opponent_interest(self) -> List[float]:
+        """
+        Very cheap estimate: for each type we count how many items the
+        opponent has *kept* in the offers we have seen (i.e. total –
+        what they gave us).  Normalise to [0, 1].
+        """
+        if not self.opponent_history:
+            return [0.0] * len(self.total_counts)
+
+        kept = [0] * len(self.total_counts)
+        for opp_offer in self.opponent_history:
+            for i, gave_us in enumerate(opp_offer):
+                kept[i] += self.total_counts[i] - gave_us   # items opponent kept
+
+        max_kept = max(kept) if kept else 1
+        return [k / max_kept for k in kept]
+
+    def _make_greedy_offer(self, target: int,
+                           opp_interest: List[float]) -> List[int]:
+        """
+        Build a bundle that reaches ``target`` value while trying to
+        leave items with high opponent interest for the opponent.
+        """
+        offer = [0] * len(self.total_counts)
         accumulated = 0
-        for i in indices:
-            if self.values[i] == 0:
+
+        # we walk through our items ordered by our own value (high → low)
+        for idx in self.value_rank:
+            if self.values[idx] == 0:
                 continue          # never request valueless items
-            max_can_take = self.counts[i] - offer[i]
-            if max_can_take == 0:
+
+            # remaining items of this type that we could still take
+            remaining = self.total_counts[idx] - offer[idx]
+
+            if remaining <= 0:
                 continue
-            # how many of this type do we need to reach the target?
-            needed = (target - accumulated + self.values[i] - 1) // self.values[i]
-            take = min(max_can_take, max(0, needed))
-            # if we already reached the target, we stop taking more
+
+            # we would like to keep at least a fraction of this type for the opponent
+            # proportional to how much we think they value it.
+            # The more they like it, the more we leave for them.
+            leave_frac = opp_interest[idx] * 0.5          # up to 50 % of stock
+            max_we_can_take = int(remaining * (1 - leave_frac))
+
+            if max_we_can_take <= 0:
+                continue
+
+            # how many of this type are needed to reach the target?
+            needed = (target - accumulated + self.values[idx] - 1) // self.values[idx]
+            take = min(max_we_can_take, needed, remaining)
+
+            if take > 0:
+                offer[idx] = take
+                accumulated += take * self.values[idx]
+
             if accumulated >= target:
                 break
-            offer[i] = take
-            accumulated += take * self.values[i]
 
-        # If we couldn't reach the threshold (e.g., not enough valuable items),
+        # If we couldn't reach the target (e.g., not enough valuable items)
         # just take everything we value positively.
         if accumulated < target:
-            for i in indices:
-                if self.values[i] > 0:
-                    offer[i] = self.counts[i]
+            for idx in self.value_rank:
+                if self.values[idx] > 0:
+                    offer[idx] = self.total_counts[idx]
 
         return offer
 
-    # --------------------------------------------------------------------- #
+    # ------------------------------------------------------------------ #
     # Main interaction method
-    # --------------------------------------------------------------------- #
+    # ------------------------------------------------------------------ #
     def offer(self, o: Optional[List[int]]) -> Optional[List[int]]:
         """
         Called each turn.
@@ -121,7 +165,7 @@ class Agent:
         ----------
         o : list[int] | None
             The opponent's last offer (expressed as what *we* would receive).
-            ``None`` on the very first turn of the negotiation.
+            ``None`` on the very first turn.
 
         Returns
         -------
@@ -129,21 +173,27 @@ class Agent:
             ``None`` to accept the opponent's offer,
             otherwise a new offer (what we would like to receive).
         """
-        # Decrease the threshold a little – we become more conciliatory
-        # as the negotiation proceeds.
-        self.threshold = max(0, self.threshold - self.decrement)
         self.turns_used += 1
 
         # -----------------------------------------------------------------
-        # 1) Evaluate opponent's offer (if any)
+        # 1)  Evaluate opponent's offer (if any)
         # -----------------------------------------------------------------
         if o is not None:
+            # remember it for opponent modelling
+            self.opponent_history.append(o)
+
             our_value = self._value_of_bundle(o)
-            if our_value >= self.threshold:
-                # Accept – returning None tells the framework we accept.
+            target = self._current_target()
+
+            # Accept if the offer meets our current target.
+            # In the final round we are even more tolerant: accept any
+            # positive value to avoid a walk‑away.
+            if our_value >= target or (self.turns_used >= self.max_rounds * 2 and our_value > 0):
                 return None
 
         # -----------------------------------------------------------------
-        # 2) Counter‑offer: try to get at least the current threshold.
+        # 2)  Counter‑offer
         # -----------------------------------------------------------------
-        return self._make_greedy_offer()
+        target = self._current_target()
+        opp_interest = self._estimate_opponent_interest()
+        return self._make_greedy_offer(target, opp_interest)

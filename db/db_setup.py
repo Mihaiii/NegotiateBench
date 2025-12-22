@@ -96,8 +96,6 @@ def setup_database():
             SELECT
                 ROW_NUMBER() OVER (ORDER BY (SUM(profit) * 100.0 / SUM(max_possible_profit)) DESC) AS rank,
                 model_name,
-                SUM(max_possible_profit) AS max_possible_profit,
-                SUM(profit) AS total_profit,
                 (SUM(profit) * 100.0 / SUM(max_possible_profit))::NUMERIC(5,2) AS profit_percentage
             FROM negotiations
             WHERE timestamp = (SELECT MAX(timestamp) FROM negotiations)

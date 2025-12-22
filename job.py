@@ -135,7 +135,7 @@ def main():
 
         # Filter samples to only include those where this model participated
         model_samples = [
-            s
+            s.get("data")
             for s in samples
             if s.get("model_name") == display_name
             or s.get("opponent_model_name") == display_name

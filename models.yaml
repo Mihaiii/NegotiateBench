@@ -1,7 +1,9 @@
 models:
-  - display_name: Olmo 3.1 32b think
-    openrouter_name: allenai/olmo-3.1-32b-think:free
-  - display_name: Mimo V2 Flash
-    openrouter_name: xiaomi/mimo-v2-flash:free
-  - display_name: AI Trinity Mini
-    openrouter_name: arcee-ai/trinity-mini:free
+  - display_name: Gemini 3 Flash Preview
+    openrouter_name: google/gemini-3-flash-preview
+  - display_name: Gemini 2.5 Flash
+    openrouter_name: google/gemini-2.5-flash
+  - display_name: GPT OSS 120b
+    openrouter_name: openai/gpt-oss-120b
+  - display_name: GPT 4o Mini
+    openrouter_name: openai/gpt-4o-mini

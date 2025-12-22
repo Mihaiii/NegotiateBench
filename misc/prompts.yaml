@@ -20,57 +20,57 @@ system_prompt: |
 
 
 problem_description: |
-Let's say there are a book, two hats, and three balls. You and a partner have to decide how to split these objects between the two of you. To you, the book is worth $4, a ball $2, and the hats are worthless. The partner might value the same objects differently; you don't know their valuation, but you know that the total worth of all objects is the same as for you, in this case, $10.
+  Let's say there are a book, two hats, and three balls. You and a partner have to decide how to split these objects between the two of you. To you, the book is worth $4, a ball $2, and the hats are worthless. The partner might value the same objects differently; you don't know their valuation, but you know that the total worth of all objects is the same as for you, in this case, $10.
 
-You and the partner take turns making offers to each other about how to split the goods. On each turn, one can either accept the partner's offer (except on the very first turn), or make a counter-offer. The negotiations are limited to 15 rounds (that is, there can be up to 30 offers in total). If an agreement is reached, each of you receives the amount that their part of the goods is worth to them. If there is still no agreement after the last turn (that is, the last word is a counter-offer rather than acceptance), neither partner receives anything at all. The same happens if one of the partners walks away from the negotiations.
+  You and the partner take turns making offers to each other about how to split the goods. On each turn, one can either accept the partner's offer (except on the very first turn), or make a counter-offer. The negotiations are limited to 15 rounds (that is, there can be up to 30 offers in total). If an agreement is reached, each of you receives the amount that their part of the goods is worth to them. If there is still no agreement after the last turn (that is, the last word is a counter-offer rather than acceptance), neither partner receives anything at all. The same happens if one of the partners walks away from the negotiations.
 
-Here is how the negotiations might go:
+  Here is how the negotiations might go:
 
-- You: I want the book and two balls; you get a ball and both hats.
-- Other: I don't accept. I want all the balls and a hat; you get the book and a hat.
-- You: I don't accept. I want the book and a ball; you get two balls and both hats.
-- Other: I accept.
-Unknown to you, the partner's valuation was: $2 for a ball, $2 for a hat, nothing for a book. Your agreement brought $6 to you and $8 to your partner.
+  - You: I want the book and two balls; you get a ball and both hats.
+  - Other: I don't accept. I want all the balls and a hat; you get the book and a hat.
+  - You: I don't accept. I want the book and a ball; you get two balls and both hats.
+  - Other: I accept.
+  Unknown to you, the partner's valuation was: $2 for a ball, $2 for a hat, nothing for a book. Your agreement brought $6 to you and $8 to your partner.
 
-In general, there are two or more types of objects, and a positive number of objects of each type. Each type of object is worth some nonnegative integer to each partner. The total value of all objects for each of the partners is the same, although the particular valuations are, in general, different between the partners. A proposed split must distribute all objects between partners; individual objects cannot be partitioned.
+  In general, there are two or more types of objects, and a positive number of objects of each type. Each type of object is worth some nonnegative integer to each partner. The total value of all objects for each of the partners is the same, although the particular valuations are, in general, different between the partners. A proposed split must distribute all objects between partners; individual objects cannot be partitioned.
 
-Your goal is to write a script that tries to maximize the value of its deal.
+  Your goal is to write a script that tries to maximize the value of its deal.
 
-# Solutions
+  # Solutions
 
-A solution is a Python file with no dependencies. It must have an Agent class with a constructor and a single method:
+  A solution is a Python file with no dependencies. It must have an Agent class with a constructor and a single method:
 
-```python
-class Agent:
-    def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
-        pass
+  ```python
+  class Agent:
+      def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
+          pass
 
-    def offer(self, o: list[int] | None) -> list[int] | None:
-        pass
+      def offer(self, o: list[int] | None) -> list[int] | None:
+          pass
 
-```
-An instance of this class is created once for a negotiation session. The constructor receives the following arguments:
+  ```
+  An instance of this class is created once for a negotiation session. The constructor receives the following arguments:
 
-- me is 0 if your turn is first, and 1 if your turn is second.
-- counts is a list of integers, describing how many of each type of object there is. This list is between 2 and 10 elements long.
-- values is a list of integers the same length as counts, describing how much every object is worth to you.
-- max_rounds is the limit on the number of rounds in the negotiations; a round is two turns, one by each partner.
+  - me is 0 if your turn is first, and 1 if your turn is second.
+  - counts is a list of integers, describing how many of each type of object there is. This list is between 2 and 10 elements long.
+  - values is a list of integers the same length as counts, describing how much every object is worth to you.
+  - max_rounds is the limit on the number of rounds in the negotiations; a round is two turns, one by each partner.
 
-The offer method is called each time when it's your turn. Its argument o is a list of integers the same size as counts, which describes how many of each type of object the partner offers to you. If your turn is first, and this is the first round, o is None.
+  The offer method is called each time when it's your turn. Its argument o is a list of integers the same size as counts, which describes how many of each type of object the partner offers to you. If your turn is first, and this is the first round, o is None.
 
-The offer method should return None if you accept the offer (except when o is None). Otherwise, it should be a list of integers the same size as counts, describing how many of each type of object you want for yourself. Note that both the argument and the return value of offer describe the partition from your perspective, that is, what you get.
+  The offer method should return None if you accept the offer (except when o is None). Otherwise, it should be a list of integers the same size as counts, describing how many of each type of object you want for yourself. Note that both the argument and the return value of offer describe the partition from your perspective, that is, what you get.
 
-There is a timeout of 5 second per turn. If the code times out, throws an exception or returns an invalid value, it is regarded as walking away from the negotiations, and neither partner receives anything.
+  There is a timeout of 5 second per turn. If the code times out, throws an exception or returns an invalid value, it is regarded as walking away from the negotiations, and neither partner receives anything.
 
-The module won't be allowed to learn, i.e. to keep any data persistent between sessions.
+  The module won't be allowed to learn, i.e. to keep any data persistent between sessions.
 
-See the below example for a very simple example of a negotiation script. It will accept any offer that allows it to receive at least half of the total value; otherwise, it simply demands all items with nonzero value. It also demonstrates the use of the log function.
+  See the below example for a very simple example of a negotiation script. It will accept any offer that allows it to receive at least half of the total value; otherwise, it simply demands all items with nonzero value. It also demonstrates the use of the log function.
 
-# Code example
+  # Code example
 
-```python
-{code_example}
-```
+  ```python
+  {code_example}
+  ```
 
 user_prompt: |
   Please solve the following coding problem.

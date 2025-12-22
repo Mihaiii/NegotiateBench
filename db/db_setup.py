@@ -119,11 +119,11 @@ def setup_database():
         )
         print("Public read access granted to view.")
 
-        # Create player_data table
-        print("Creating table 'player_data'...")
+        # Create session_samples table
+        print("Creating table 'session_samples'...")
         cursor.execute(
             """
-            CREATE TABLE IF NOT EXISTS player_data (
+            CREATE TABLE IF NOT EXISTS session_samples (
                 id BIGSERIAL PRIMARY KEY,
                 model_name TEXT NOT NULL,
                 opponent_model_name TEXT NOT NULL,
@@ -132,29 +132,29 @@ def setup_database():
             );
             """
         )
-        print("Table 'player_data' created or already exists.")
+        print("Table 'session_samples' created or already exists.")
 
         # Create index on commit_hash
         cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_player_data_commit_hash ON player_data(commit_hash);"
+            "CREATE INDEX IF NOT EXISTS idx_session_samples_commit_hash ON session_samples(commit_hash);"
         )
         print("Index on commit_hash created or already exists.")
 
-        # Enable RLS on player_data
-        cursor.execute("ALTER TABLE player_data ENABLE ROW LEVEL SECURITY;")
-        print("RLS enabled on player_data.")
+        # Enable RLS on session_samples
+        cursor.execute("ALTER TABLE session_samples ENABLE ROW LEVEL SECURITY;")
+        print("RLS enabled on session_samples.")
 
-        # Create policy for player_data if it doesn't exist
+        # Create policy for session_samples if it doesn't exist
         cursor.execute(
             """
             DO $$
             BEGIN
                 IF NOT EXISTS (
                     SELECT 1 FROM pg_policies
-                    WHERE tablename = 'player_data'
+                    WHERE tablename = 'session_samples'
                     AND policyname = 'public_read_only'
                 ) THEN
-                    CREATE POLICY public_read_only ON player_data
+                    CREATE POLICY public_read_only ON session_samples
                         FOR SELECT
                         TO anon, authenticated
                         USING (true);
@@ -162,11 +162,11 @@ def setup_database():
             END $$;
             """
         )
-        print("Public read-only policy created for player_data or already exists.")
+        print("Public read-only policy created for session_samples or already exists.")
 
-        # Grant SELECT on player_data to anon and authenticated roles
-        cursor.execute("GRANT SELECT ON player_data TO anon, authenticated;")
-        print("Public read access granted to player_data table.")
+        # Grant SELECT on session_samples to anon and authenticated roles
+        cursor.execute("GRANT SELECT ON session_samples TO anon, authenticated;")
+        print("Public read access granted to session_samples table.")
 
         print("Database setup completed successfully!")
 

@@ -47,7 +47,7 @@ def get_top_model_latest_session():
 
 def get_samples(commit_hash):
     """
-    Get all player_data records filtered by commit_hash.
+    Get all session_samples records filtered by commit_hash.
     Returns a list of dictionaries with id, model_name, opponent_model_name, data, and commit_hash.
     """
     if not DATABASE_URL:
@@ -60,7 +60,7 @@ def get_samples(commit_hash):
         cursor.execute(
             """
             SELECT id, model_name, opponent_model_name, data, commit_hash
-            FROM player_data
+            FROM session_samples
             WHERE commit_hash = %s;
             """,
             (commit_hash,),
@@ -182,7 +182,7 @@ def save_battle_samples(battle_scenarios: dict, commit_hash: str):
         execute_values(
             cursor,
             """
-            INSERT INTO player_data (model_name, opponent_model_name, data, commit_hash)
+            INSERT INTO session_samples (model_name, opponent_model_name, data, commit_hash)
             VALUES %s
             """,
             records,

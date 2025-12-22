@@ -95,7 +95,11 @@ def extract_python_code(response_text: str) -> str | None:
 
 def save_solution(display_name: str, code: str) -> None:
     """Save the validated code to the solutions folder."""
-    solutions_path = Path(__file__).parent / "solutions" / f"{display_name}.py"
+
+    sanitized_display_name = re.sub(r"[^\w]", "_", display_name)
+    solutions_path = (
+        Path(__file__).parent.parent / "solutions" / f"{sanitized_display_name}.py"
+    )
     with open(solutions_path, "w") as f:
         f.write(code)
     print(f"Saved solution to {solutions_path}")

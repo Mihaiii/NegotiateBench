@@ -1,8 +1,7 @@
 import os
 import random
-from pathlib import Path
 
-from misc.loaders import get_current_code
+from misc.io import get_current_code
 
 
 def load_agent_class(display_name: str):

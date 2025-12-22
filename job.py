@@ -1,4 +1,3 @@
-import yaml
 from db.service import get_top_model_latest_session
 from dotenv import load_dotenv
 import json
@@ -11,7 +10,6 @@ from misc.battlefield import validate_code, generate_negotiation_data, run_battl
 from misc.loaders import load_models, load_prompts, get_current_code, get_code_example
 from misc.utils import sanitize
 from db.service import save_battle_results, save_battle_samples, get_samples
-from db.db_setup import setup_database
 
 # Load environment variables from .env file
 load_dotenv()
@@ -155,6 +153,11 @@ def main():
             models.remove(model)
             continue
 
+    # Check if we have any models left to battle
+    if len(models) < 2:
+        print("Not enough models to run battles (need at least 2 models)")
+        return
+
     try:
         # Run battles between all models
         print("\n" + "=" * 50)
@@ -162,6 +165,12 @@ def main():
         print("=" * 50)
 
         battle_results, battle_scenarios = run_battles(models, negotiation_data)
+
+        # Check if we got any battle results
+        if not battle_results:
+            print("No battle results generated - no valid agents found")
+            return
+
         # each model fights against all other models and all other models fight against it (with swapped data)
         max_possible_profit = total_target_worth * 2 * (len(models) - 1)
         # Print results summary

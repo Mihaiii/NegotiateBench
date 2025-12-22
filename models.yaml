@@ -23,3 +23,5 @@ models:
     openrouter_name: x-ai/grok-code-fast-1
   - display_name: Grok 4
     openrouter_name: x-ai/grok-4
+  - display_name: Coder Large
+    openrouter_name: arcee-ai/coder-large

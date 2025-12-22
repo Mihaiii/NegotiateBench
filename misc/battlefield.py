@@ -392,8 +392,15 @@ def run_battles(
                         position_key = "as_agent_1"
                         max_for_position = max_as_agent_1
 
-                    # Only add if we haven't reached the limit for this position
-                    if scenario_counts[canonical_key][position_key] < max_for_position:
+                    # Only add if we haven't reached the limit for this position AND total samples for this pair
+                    total_samples_for_pair = (
+                        scenario_counts[canonical_key]["as_agent_0"]
+                        + scenario_counts[canonical_key]["as_agent_1"]
+                    )
+                    if (
+                        scenario_counts[canonical_key][position_key] < max_for_position
+                        and total_samples_for_pair < num_samples
+                    ):
                         # Transform scenario to use model names instead of player_0/player_1
                         scenario_with_names = {
                             "counts": scenario["counts"],

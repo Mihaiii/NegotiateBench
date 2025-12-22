@@ -22,7 +22,7 @@ system_prompt: |
 problem_description: |
   Let's say there are a book, two hats, and three balls. You and a partner have to decide how to split these objects between the two of you. To you, the book is worth $4, a ball $2, and the hats are worthless. The partner might value the same objects differently; you don't know their valuation, but you know that the total worth of all objects is the same as for you, in this case, $10.
 
-  You and your partner take turns making offers to each other about how to split the goods. On each turn, you can either accept the partner's offer (except on the very first turn) or make a counter-offer. Negotiations are limited to 15 rounds (up to 30 offers in total). If an agreement is reached, each of you receives the value of your share according to your own valuation. If there is no agreement after the last turn (i.e., the last word is a counter-offer rather than acceptance), neither partner receives anything. The same happens if either partner walks away from the negotiations.
+  You and your partner take turns making offers to each other about how to split the goods. On each turn, you can either accept the partner's offer (except on the very first turn) or make a counter-offer. Negotiations are limited to a specified number of rounds. To determine the total number of offers that can be made, multiply the number of rounds by 2. If an agreement is reached, each of you receives the value of your share according to your own valuation. If there is no agreement after the last turn (i.e., the last word is a counter-offer rather than acceptance), neither partner receives anything. The same happens if either partner walks away from the negotiations.
 
   Here is how the negotiations might go:
 

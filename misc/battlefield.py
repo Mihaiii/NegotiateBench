@@ -78,9 +78,9 @@ def generate_negotiation_data():
     - Total worth can be 32, 64, or 128
 
     Returns:
-        A tuple of (negotiation_data, max_possible_profit) where:
+        A tuple of (negotiation_data, total_target_worth) where:
         - negotiation_data: list of scenarios
-        - max_possible_profit: sum of all scenario worths (same for all models)
+        - total_target_worth: sum of all scenario worths (same for all models)
     """
 
     # Get max_num_data from environment variable, default to 20
@@ -138,7 +138,7 @@ def generate_negotiation_data():
         return None
 
     data = []
-    max_possible_profit = 0
+    total_target_worth = 0
     target_worths = [32, 64, 128]
 
     for _ in range(max_num_data):
@@ -171,10 +171,10 @@ def generate_negotiation_data():
             }
         )
 
-        # Add to max_possible_profit (same worth for each player in each scenario)
-        max_possible_profit += target_worth
+        # Add to total_target_worth (same worth for each player in each scenario)
+        total_target_worth += target_worth
 
-    return data, max_possible_profit
+    return data, total_target_worth
 
 
 def run_negotiation(agent_0, agent_1, counts, max_rounds):

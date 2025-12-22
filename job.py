@@ -97,9 +97,9 @@ def main():
     print(f"Loaded models: {models}")
 
     # Generate negotiation data
-    negotiation_data, max_possible_profit = generate_negotiation_data()
+    negotiation_data, total_target_worth = generate_negotiation_data()
     print(f"Generated {len(negotiation_data)} negotiation scenarios")
-    print(f"Max possible profit per model: {max_possible_profit}")
+    print(f"Total target worth: {total_target_worth}")
     print(json.dumps(negotiation_data[:2], indent=2))  # Print first 2 for brevity
 
     # Identify top model
@@ -137,7 +137,8 @@ def main():
         print("=" * 50)
 
         battle_results, battle_scenarios = run_battles(models, negotiation_data)
-
+        # each model fights against all other models and all other models fight against it (with swapped data)
+        max_possible_profit = total_target_worth * 2 * (len(models) - 1)
         # Print results summary
         print("\n" + "=" * 50)
         print("Battle Results Summary:")

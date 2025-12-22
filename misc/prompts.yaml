@@ -73,7 +73,7 @@ problem_description: |
   ```
 
 user_prompt: |
-  Please solve the following coding problem.
+  Please provide Python code wrapped in "```python" and "```" to solve the provided haggling negotiation problem.
   
   {current_code_section}
 

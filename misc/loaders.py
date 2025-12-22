@@ -1,6 +1,7 @@
 from pathlib import Path
-import re
 import yaml
+
+from misc.utils import sanitize
 
 
 def load_models():
@@ -21,7 +22,7 @@ def load_prompts():
 
 def get_current_code(display_name: str) -> str | None:
     """Get the current code for a model from the solutions folder."""
-    sanitized_display_name = re.sub(r"[^\w]", "_", display_name)
+    sanitized_display_name = sanitize(display_name)
     solutions_path = (
         Path(__file__).parent.parent / "solutions" / f"{sanitized_display_name}.py"
     )

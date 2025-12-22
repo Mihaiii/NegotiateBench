@@ -9,6 +9,7 @@ import re
 import misc.git as git
 from misc.battlefield import validate_code, generate_negotiation_data, run_battles
 from misc.loaders import load_models, load_prompts, get_current_code, get_code_example
+from misc.utils import sanitize
 from db.service import save_battle_results, save_battle_samples, get_samples
 from db.db_setup import setup_database
 
@@ -96,9 +97,9 @@ def extract_python_code(response_text: str) -> str | None:
 def save_solution(display_name: str, code: str) -> None:
     """Save the validated code to the solutions folder."""
 
-    sanitized_display_name = re.sub(r"[^\w]", "_", display_name)
+    sanitized_display_name = sanitize(display_name)
     solutions_path = (
-        Path(__file__).parent.parent / "solutions" / f"{sanitized_display_name}.py"
+        Path(__file__).parent / "solutions" / f"{sanitized_display_name}.py"
     )
     with open(solutions_path, "w") as f:
         f.write(code)

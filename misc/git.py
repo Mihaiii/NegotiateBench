@@ -1,7 +1,8 @@
 from pathlib import Path
 import os
-import re
 import git
+
+from misc.utils import sanitize
 
 # Initialize repo once at module level
 _repo_path = Path(__file__).parent.parent
@@ -71,7 +72,7 @@ def get_code_link(commit_hash: str, model_name: str) -> str:
     if origin_url.endswith(".git"):
         origin_url = origin_url[:-4]
 
-    sanitized_display_name = re.sub(r"[^\w]", "_", model_name)
+    sanitized_display_name = sanitize(model_name)
     # Build the link
     code_link = f"{origin_url}/blob/{commit_hash}/solutions/{sanitized_display_name}.py"
     return code_link

@@ -189,11 +189,16 @@ def main():
         )
         print(f"\nWinner: {winner_name}")
 
-        # Filter battle_scenarios to only include scenarios where one of the players is the winner
-        battle_scenarios = [
-            scenario for scenario in battle_scenarios
-            if scenario.get("player1") == winner_name or scenario.get("player2") == winner_name
-        ]
+        # Flatten all scenario dicts from battle_scenarios dict and filter for winner
+        filtered_scenarios = []
+        for scenario_list in battle_scenarios.values():
+            for scenario_dict in scenario_list:
+                scenario = scenario_dict.get("scenario", {})
+                # Check for winner in either player's values
+                player_keys = [k for k in scenario.keys() if k.endswith("_values")]
+                if any(winner_name in k for k in player_keys):
+                    filtered_scenarios.append(scenario_dict)
+        battle_scenarios = filtered_scenarios
 
         # Save battle scenarios
         save_battle_samples(battle_scenarios, new_commit_hash)

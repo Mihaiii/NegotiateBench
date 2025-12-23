@@ -6,7 +6,7 @@ NegotiateBench evaluates the ability of large language models (LLMs) to design h
 
 ## Why?
 
-The goal is to identify which LLMs perform best in environments where no correct solution **can be** known in advance.
+The goal is to identify which LLMs perform best in environments where no correct solution **can be** known in advance (ex: during training time).
 
 ## How does it work?
 

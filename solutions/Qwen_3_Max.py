@@ -16,20 +16,29 @@ class Agent:
             self.opponent_offers.append(o)
             offer_value = sum(o_i * v_i for o_i, v_i in zip(o, self.values))
             
-            # Calculate minimum acceptable based on time pressure
+            # Calculate acceptance threshold based on round and opponent behavior
             total_turns = self.max_rounds * 2
             turns_elapsed = self.turn_count
             time_pressure = turns_elapsed / total_turns
             
-            # Be more willing to accept as time runs out
-            if time_pressure >= 0.9:  # Last 10% of turns
+            # Base acceptance threshold
+            if time_pressure >= 0.8:  # Last 20% of turns
                 min_acceptable = self.total_value * 0.4
-            elif time_pressure >= 0.7:  # Last 30% of turns
+            elif time_pressure >= 0.6:  # Last 40% of turns
                 min_acceptable = self.total_value * 0.5
-            elif time_pressure >= 0.5:  # Middle phase
+            elif time_pressure >= 0.4:  # Middle phase
                 min_acceptable = self.total_value * 0.6
             else:  # Early phase
-                min_acceptable = self.total_value * 0.7
+                min_acceptable = self.total_value * 0.65  # More reasonable early threshold
+            
+            # If opponent is being generous, accept reasonable offers
+            if len(self.opponent_offers) >= 2:
+                # Check if opponent is consistently offering good deals
+                recent_offers = self.opponent_offers[-2:]
+                avg_recent_value = sum(sum(offer[i] * self.values[i] for i in range(len(offer))) 
+                                     for offer in recent_offers) / len(recent_offers)
+                if avg_recent_value >= self.total_value * 0.55:
+                    min_acceptable = min(min_acceptable, self.total_value * 0.55)
             
             if offer_value >= min_acceptable:
                 return None
@@ -42,73 +51,70 @@ class Agent:
         turns_elapsed = self.turn_count
         time_pressure = turns_elapsed / total_turns
         
-        # Base target value decreases with time pressure
-        if time_pressure >= 0.9:
-            target_ratio = 0.6
-        elif time_pressure >= 0.7:
+        # More reasonable target values
+        if time_pressure >= 0.8:
+            target_ratio = 0.65
+        elif time_pressure >= 0.6:
             target_ratio = 0.7
-        elif time_pressure >= 0.5:
+        elif time_pressure >= 0.4:
+            target_ratio = 0.75
+        elif time_pressure >= 0.2:
             target_ratio = 0.8
-        elif time_pressure >= 0.3:
-            target_ratio = 0.85
         else:
-            target_ratio = 0.9
+            target_ratio = 0.85  # Still ambitious but not greedy
         
         target_value = self.total_value * target_ratio
         
-        # Create offer prioritizing high-value items
+        # Start with a reasonable base offer
         offer = [0] * len(self.counts)
         current_value = 0
         
-        # Create list of (value_per_item, index) for valuable items
+        # Identify valuable items to us
         valuable_items = []
         for i in range(len(self.counts)):
             if self.values[i] > 0:
                 valuable_items.append((self.values[i], i))
-        
-        # Sort by value descending
         valuable_items.sort(reverse=True)
         
-        # Greedily take highest value items first
+        # Take high-value items first, but don't be greedy
         for value, idx in valuable_items:
             if current_value >= target_value:
                 break
+            # Calculate how many we actually need
             remaining_needed = target_value - current_value
-            max_items = self.counts[idx]
-            items_to_take = min(max_items, int((remaining_needed + value - 1) // value))
-            offer[idx] = items_to_take
-            current_value += items_to_take * value
+            items_needed = min(self.counts[idx], int((remaining_needed + value - 1) // value))
+            offer[idx] = items_needed
+            current_value += items_needed * value
         
-        # If we have opponent offer history, identify items they seem to value
+        # Adjust based on opponent behavior
         if self.opponent_offers:
-            # Calculate what opponent keeps: counts[i] - opponent_offer[i]
-            opponent_keeps_total = [0] * len(self.counts)
+            # Calculate what opponent typically keeps
+            opponent_keeps = [0] * len(self.counts)
             for opp_offer in self.opponent_offers:
                 for i in range(len(self.counts)):
-                    opponent_keeps_total[i] += self.counts[i] - opp_offer[i]
+                    opponent_keeps[i] += self.counts[i] - opp_offer[i]
+            avg_opponent_keeps = [keeps / len(self.opponent_offers) for keeps in opponent_keeps]
             
-            avg_opponent_keeps = [keeps / len(self.opponent_offers) for keeps in opponent_keeps_total]
-            
-            # Concede items that opponent values highly but we value lowly
-            # Only do this if we're not in very early rounds
-            if turns_elapsed > 2:
+            # Concede on items opponent clearly values more, especially if we're in middle/late game
+            if turns_elapsed > 1:
                 for i in range(len(self.counts)):
-                    # If opponent keeps most of this item and we don't value it much
-                    if (avg_opponent_keeps[i] >= self.counts[i] * 0.6 and 
-                        self.values[i] <= max(self.values) * 0.3 and
-                        offer[i] > 0):
-                        # Reduce our demand on this item
-                        reduction = min(offer[i], 1)
-                        offer[i] -= reduction
+                    # If opponent keeps most of this item AND we don't value it highly relative to our best items
+                    if (avg_opponent_keeps[i] >= self.counts[i] * 0.7 and 
+                        self.values[i] < max(self.values) * 0.5):
+                        # Reduce our demand significantly
+                        offer[i] = max(0, offer[i] - 1)
+                        if offer[i] < 0:
+                            offer[i] = 0
         
-        # Ensure we don't exceed available counts
+        # Ensure we don't exceed available counts (safety check)
         for i in range(len(offer)):
             offer[i] = min(offer[i], self.counts[i])
-            
-        # Safety: if this is our last possible turn, make a reasonable offer
-        if self.turn_count >= self.max_rounds * 2 - 1:
-            # Be very reasonable - aim for 50% of our value
-            target_value = self.total_value * 0.5
+            offer[i] = max(0, offer[i])
+        
+        # Last resort: if this is our final turn, make a very reasonable offer
+        if self.turn_count >= total_turns - 1:
+            # Aim for just over 50% to ensure acceptance
+            target_value = self.total_value * 0.51
             offer = [0] * len(self.counts)
             current_value = 0
             
@@ -122,5 +128,12 @@ class Agent:
                 items_to_take = min(self.counts[idx], int((remaining_needed + value - 1) // value))
                 offer[idx] = items_to_take
                 current_value += items_to_take * value
+        
+        # Ensure offer is valid (non-negative, doesn't exceed counts)
+        for i in range(len(offer)):
+            if offer[i] < 0:
+                offer[i] = 0
+            if offer[i] > self.counts[i]:
+                offer[i] = self.counts[i]
         
         return offer

@@ -1,5 +1,4 @@
 import math
-import random
 from typing import List, Optional
 
 class Agent:
@@ -8,239 +7,213 @@ class Agent:
         self.counts = counts
         self.values = values
         self.max_rounds = max_rounds
-        
-        # Calculate my total value
-        self.total_value = sum(counts[i] * values[i] for i in range(len(counts)))
-        
-        # Track negotiation state
         self.round = 0
+        self.n = len(counts)
+        self.total_value = sum(c * v for c, v in zip(counts, values))
+        
+        # Opponent value estimate: start with our values (same total)
+        self.opp_values = values[:]
         self.opponent_offers = []
-        self.my_offers = []
         
-        # Calculate normalized values for sorting items
-        self.item_priority = sorted(
-            range(len(counts)),
-            key=lambda i: (values[i], -counts[i]),  # Higher value, fewer items first
-            reverse=True
-        )
+        # Candidate allocations
+        self.candidates = self.generate_candidates()
+        self.candidate_my_values = [self.value_of(a, self.values) for a in self.candidates]
+        self.candidate_opp_values = [self.value_of(self.complement(a), self.opp_values) for a in self.candidates]
         
-        # Generate a Pareto-optimal frontier of allocations
-        self.generate_frontier()
+        # Strategy parameters
+        self.start_target_ratio = 0.9
+        self.min_target_ratio = 0.5
+        self.concession_exp = 1.5
+        self.required_opp_factor = 1.0
+        self.required_opp_decay = 0.95
         
-        # Strategic parameters
-        self.opening_aggressiveness = 0.9  # Start demanding 90% of value
-        self.min_acceptance_ratio = 0.5    # Never accept less than 50%
-        self.concession_rate = 0.85        # Base concession rate
-        
-        # Opponent modeling
-        self.opponent_values_estimate = None
-        self.opponent_preference_confidence = [0] * len(counts)
-        
-    def generate_frontier(self):
-        """Generate a set of good allocations efficiently using a greedy approach"""
-        self.frontier = []
-        
-        # Generate allocations by taking items in priority order
-        for target_ratio in [0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5]:
-            allocation = self.create_allocation_for_ratio(target_ratio)
-            if allocation not in self.frontier:
-                self.frontier.append(allocation)
-        
-        # Also generate allocations that give away items we don't value
-        zero_value_allocation = [0] * len(self.counts)
-        for i in range(len(self.counts)):
-            if self.values[i] > 0:
-                zero_value_allocation[i] = self.counts[i]
-        if zero_value_allocation not in self.frontier:
-            self.frontier.append(zero_value_allocation)
-        
-        # Sort frontier by my value (descending)
-        self.frontier.sort(key=lambda a: self.value_of(a), reverse=True)
-    
-    def create_allocation_for_ratio(self, target_ratio: float) -> List[int]:
-        """Create an allocation that gives me approximately target_ratio of my total value"""
-        allocation = [0] * len(self.counts)
-        current_value = 0
-        target_value = self.total_value * target_ratio
-        
-        # Take items in priority order until we reach target
-        for i in self.item_priority:
-            if self.values[i] == 0:
-                continue
-                
-            # Take as many of this item as needed
-            max_to_take = self.counts[i]
-            item_value = self.values[i]
-            
-            # How many can we take without exceeding target too much?
-            if item_value > 0:
-                needed = min(max_to_take, max(0, math.ceil((target_value - current_value) / item_value)))
-                if needed > 0:
-                    allocation[i] = needed
-                    current_value += needed * item_value
-        
-        # If we're under target, add more items
-        if current_value < target_value:
-            for i in self.item_priority:
-                if self.values[i] == 0:
-                    continue
-                    
-                remaining = self.counts[i] - allocation[i]
-                if remaining > 0:
-                    can_add = min(remaining, math.ceil((target_value - current_value) / self.values[i]))
-                    if can_add > 0:
-                        allocation[i] += can_add
-                        current_value += can_add * self.values[i]
-        
-        return allocation
-    
-    def value_of(self, allocation: List[int]) -> int:
-        """Calculate my value for an allocation"""
-        return sum(allocation[i] * self.values[i] for i in range(len(allocation)))
-    
-    def opponent_value_estimate(self, allocation: List[int]) -> float:
-        """Estimate opponent's value for what they get"""
-        if self.opponent_values_estimate:
-            # Use learned opponent values
-            opponent_allocation = [self.counts[i] - allocation[i] for i in range(len(allocation))]
-            return sum(opponent_allocation[i] * self.opponent_values_estimate[i] 
-                      for i in range(len(allocation)))
+    def generate_candidates(self) -> List[List[int]]:
+        """Generate a diverse set of allocations."""
+        total_alloc = 1
+        for c in self.counts:
+            total_alloc *= (c + 1)
+        if total_alloc <= 100000:
+            return self.enumerate_all()
         else:
-            # Default estimate: assume opponent values opposite of me
-            # This is a conservative estimate
-            opponent_allocation = [self.counts[i] - allocation[i] for i in range(len(allocation))]
-            return sum(opponent_allocation[i] * (10 - self.values[i]) 
-                      for i in range(len(allocation))) / 10.0
+            return self.heuristic_all()
     
-    def update_opponent_model(self, offer: List[int]):
-        """Learn opponent's preferences from their offers"""
-        # Their offer shows what they want me to have
-        # Items they don't offer me, they likely want for themselves
-        for i in range(len(offer)):
-            if offer[i] == 0:
-                # They're keeping all of this item
-                self.opponent_preference_confidence[i] += 1
-            elif offer[i] == self.counts[i]:
-                # They're giving me all of this item
-                self.opponent_preference_confidence[i] -= 1
-        
-        # After several offers, estimate opponent's values
-        if len(self.opponent_offers) >= 3:
-            self.estimate_opponent_values()
+    def enumerate_all(self) -> List[List[int]]:
+        """Enumerate all possible allocations (feasible for small problems)."""
+        allocs = []
+        def dfs(idx: int, cur: List[int]):
+            if idx == self.n:
+                allocs.append(cur[:])
+                return
+            for k in range(self.counts[idx] + 1):
+                cur.append(k)
+                dfs(idx + 1, cur)
+                cur.pop()
+        dfs(0, [])
+        return allocs
     
-    def estimate_opponent_values(self):
-        """Estimate opponent's values based on their offers"""
-        self.opponent_values_estimate = [0] * len(self.counts)
-        
-        # Look for patterns in opponent's offers
-        for i in range(len(self.counts)):
-            total_kept = 0
-            total_offers = len(self.opponent_offers)
-            
-            for offer in self.opponent_offers:
-                # Items they give me less of, they likely value more
-                kept = self.counts[i] - offer[i]
-                total_kept += kept
-            
-            # Normalize to 0-10 scale
-            if total_offers > 0:
-                avg_kept = total_kept / total_offers
-                # Map to value estimate (0-10)
-                self.opponent_values_estimate[i] = min(10, int(avg_kept * 10 / self.counts[i]) if self.counts[i] > 0 else 0)
+    def heuristic_all(self) -> List[List[int]]:
+        """Generate allocations using greedy and targeted strategies."""
+        allocs = []
+        # Extremes
+        allocs.append(self.counts[:])
+        allocs.append([0] * self.n)
+        # Greedy for various target ratios
+        for ratio in [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]:
+            alloc = self.greedy_for_ratio(ratio)
+            if alloc not in allocs:
+                allocs.append(alloc)
+        # Give away zero‑value items
+        zero_alloc = [0] * self.n
+        for i in range(self.n):
+            if self.values[i] > 0:
+                zero_alloc[i] = self.counts[i]
+        if zero_alloc not in allocs:
+            allocs.append(zero_alloc)
+        # Take only high‑value items
+        high_alloc = [0] * self.n
+        items = sorted(range(self.n), key=lambda i: self.values[i], reverse=True)
+        for i in items:
+            if self.values[i] > 0:
+                high_alloc[i] = self.counts[i]
+        if high_alloc not in allocs:
+            allocs.append(high_alloc)
+        return allocs
     
-    def find_win_win_offer(self, min_value: int) -> Optional[List[int]]:
-        """Find an offer that gives me good value while also being good for opponent"""
-        best_offer = None
-        best_score = -float('inf')
-        
-        for alloc in self.frontier:
-            my_val = self.value_of(alloc)
-            if my_val < min_value:
+    def greedy_for_ratio(self, ratio: float) -> List[int]:
+        """Greedy allocation aiming for a fraction of total value."""
+        target = self.total_value * ratio
+        alloc = [0] * self.n
+        cur = 0
+        items = sorted(range(self.n), key=lambda i: self.values[i], reverse=True)
+        for i in items:
+            if self.values[i] <= 0:
                 continue
-                
-            # Estimate opponent's value
-            opp_val = self.opponent_value_estimate(alloc)
-            
-            # Score combines both values
-            score = my_val + opp_val * 0.3  # Weight opponent's value less
-            
-            if score > best_score:
-                best_score = score
-                best_offer = alloc
-        
-        return best_offer
+            max_take = self.counts[i]
+            if cur + self.values[i] * max_take <= target:
+                alloc[i] = max_take
+                cur += self.values[i] * max_take
+            else:
+                needed = min(max_take, int((target - cur) / self.values[i]))
+                if needed > 0:
+                    alloc[i] = needed
+                    cur += needed * self.values[i]
+        # If under, add more
+        if cur < target:
+            for i in items:
+                remaining = self.counts[i] - alloc[i]
+                if remaining > 0 and self.values[i] > 0:
+                    add = min(remaining, int((target - cur) / self.values[i]) + 1)
+                    if add > 0:
+                        alloc[i] += add
+                        cur += add * self.values[i]
+                        if cur >= target:
+                            break
+        return alloc
     
-    def calculate_time_pressure(self) -> float:
-        """Calculate how much pressure we're under due to remaining rounds"""
+    def value_of(self, alloc: List[int], values: List[int]) -> int:
+        return sum(alloc[i] * values[i] for i in range(self.n))
+    
+    def complement(self, alloc: List[int]) -> List[int]:
+        return [self.counts[i] - alloc[i] for i in range(self.n)]
+    
+    def update_opponent_values(self, offer: List[int]):
+        """Update opponent value estimates based on their offer."""
+        kept = [self.counts[i] - offer[i] for i in range(self.n)]
+        alpha = 0.3
+        new_opp = [0.0] * self.n
+        for i in range(self.n):
+            if self.counts[i] > 0:
+                kept_ratio = kept[i] / self.counts[i]
+                adj = 1.0 + alpha * (kept_ratio - 0.5)
+                new_opp[i] = self.opp_values[i] * adj
+            else:
+                new_opp[i] = self.opp_values[i]
+        # Preserve total value
+        new_total = sum(self.counts[i] * new_opp[i] for i in range(self.n))
+        if new_total > 0:
+            scale = self.total_value / new_total
+            new_opp = [v * scale for v in new_opp]
+        self.opp_values = new_opp
+        # Update cached values
+        self.candidate_opp_values = [self.value_of(self.complement(a), self.opp_values) for a in self.candidates]
+    
+    def get_current_target(self) -> float:
+        """Compute target value for us based on remaining rounds."""
         rounds_left = self.max_rounds - self.round
-        return max(0, 1 - (rounds_left / self.max_rounds) ** 0.7)
+        if rounds_left <= 0:
+            return self.total_value * self.min_target_ratio
+        t = (rounds_left / self.max_rounds) ** self.concession_exp
+        r = self.min_target_ratio + (self.start_target_ratio - self.min_target_ratio) * t
+        return self.total_value * r
+    
+    def get_required_opponent_value(self) -> float:
+        """Estimate the minimum value the opponent expects for themselves."""
+        if not self.opponent_offers:
+            return 0.0
+        opp_self_vals = []
+        for offer in self.opponent_offers:
+            kept = self.complement(offer)
+            val = self.value_of(kept, self.opp_values)
+            opp_self_vals.append(val)
+        max_self = max(opp_self_vals)
+        factor = self.required_opp_factor * (self.required_opp_decay ** (self.round - 1))
+        required = max_self * factor
+        return min(required, self.total_value * 0.9)
+    
+    def find_best_counteroffer(self, target: float, required_opp: float) -> List[int]:
+        """Select the best allocation meeting target and opponent requirements."""
+        best_alloc = None
+        best_val = -1
+        # First try to satisfy both
+        for i, alloc in enumerate(self.candidates):
+            my_val = self.candidate_my_values[i]
+            opp_val = self.candidate_opp_values[i]
+            if my_val >= target and opp_val >= required_opp:
+                if my_val > best_val:
+                    best_val = my_val
+                    best_alloc = alloc
+        if best_alloc is not None:
+            return best_alloc
+        # Relax target
+        for i, alloc in enumerate(self.candidates):
+            my_val = self.candidate_my_values[i]
+            opp_val = self.candidate_opp_values[i]
+            if opp_val >= required_opp:
+                if my_val > best_val:
+                    best_val = my_val
+                    best_alloc = alloc
+        if best_alloc is not None:
+            return best_alloc
+        # Fallback: maximize our value
+        best_alloc = max(zip(self.candidates, self.candidate_my_values), key=lambda x: x[1])[0]
+        return best_alloc
     
     def offer(self, o: Optional[List[int]]) -> Optional[List[int]]:
         self.round += 1
         
-        # If opponent made an offer
         if o is not None:
             self.opponent_offers.append(o)
-            self.update_opponent_model(o)
+            self.update_opponent_values(o)
+            offer_val = self.value_of(o, self.values)
             
-            # Calculate value of opponent's offer
-            offer_value = self.value_of(o)
-            
-            # Calculate time pressure
-            time_pressure = self.calculate_time_pressure()
-            
-            # Dynamic acceptance threshold
-            if self.round == 1:
-                # First offer: be conservative
-                accept_threshold = self.total_value * 0.7
-            elif self.round >= self.max_rounds - 1:
-                # Last round: be more lenient
-                accept_threshold = self.total_value * max(0.4, 0.6 - time_pressure)
+            # Decide whether to accept
+            target = self.get_current_target()
+            rounds_left = self.max_rounds - self.round
+            if rounds_left == 0:
+                if offer_val >= self.total_value * self.min_target_ratio:
+                    return None
             else:
-                # Middle rounds: gradual concession
-                base_threshold = self.total_value * (self.opening_aggressiveness - 
-                                                   time_pressure * (1 - self.min_acceptance_ratio))
-                accept_threshold = max(self.total_value * self.min_acceptance_ratio, base_threshold)
-            
-            # Check if we should accept
-            if offer_value >= accept_threshold:
-                # Also check if it's a good deal relative to what we can counter with
-                can_do_better = False
-                if self.round < self.max_rounds:
-                    # See if we can get significantly better
-                    better_offer = self.find_win_win_offer(offer_value * 1.1)
-                    if better_offer is None:
-                        return None  # Accept
-                    # Accept if the improvement is small
-                    better_value = self.value_of(better_offer)
-                    if better_value <= offer_value * 1.15:  # Less than 15% better
-                        return None  # Accept
-                
-                return None  # Accept
+                if offer_val >= target:
+                    # Check if we can do significantly better
+                    req_opp = self.get_required_opponent_value()
+                    best_counter = self.find_best_counteroffer(target, req_opp)
+                    best_val = self.value_of(best_counter, self.values)
+                    if best_val <= offer_val * 1.1:
+                        return None
+                    if rounds_left <= 2 and offer_val >= self.total_value * 0.6:
+                        return None
         
-        # Calculate what to demand based on round
-        time_pressure = self.calculate_time_pressure()
-        
-        if self.round == 1:
-            # Opening offer: aim high
-            target_ratio = self.opening_aggressiveness
-        elif self.round >= self.max_rounds:
-            # Last possible offer: aim for fair split
-            target_ratio = max(self.min_acceptance_ratio, 0.6 - time_pressure * 0.3)
-        else:
-            # Concession strategy
-            base_ratio = self.opening_aggressiveness - time_pressure * (self.opening_aggressiveness - self.min_acceptance_ratio)
-            # Add some randomness to avoid being too predictable
-            target_ratio = base_ratio * (0.95 + 0.1 * random.random())
-        
-        target_value = self.total_value * target_ratio
-        
-        # Find a good offer
-        if self.round > 1 and len(self.opponent_offers) > 0:
-            # Try to find a win-win based on opponent's preferences
-            win_win_offer = self.find_win_win_offer(target_value)
-            if win_win_offer is not None:
-                return win_win_offer
-        
-        # Fallback: create a new allocation
-        return self.create_allocation_for_ratio(target_ratio)
+        # Make a counteroffer
+        target = self.get_current_target()
+        req_opp = self.get_required_opponent_value()
+        return self.find_best_counteroffer(target, req_opp)

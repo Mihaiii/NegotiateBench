@@ -4,17 +4,15 @@ import random
 
 class Agent:
     """
-    Belief-sampling haggling agent.
-
-    Key features vs the provided code:
-    - Robustly handles the common "offer means what the speaker keeps" convention by inferring
-      whether incoming offers are already "our share" or need to be complemented (counts - offer).
-    - Keeps internal representation as "our share" (what we get/keep).
-    - Particle belief over opponent unit-values scaled to match the known total value constraint.
-    - Updates belief from opponent offers and from their rejection of our last offer.
-    - Generates candidates from a fast ratio-greedy concession path + random concessions + tweaks
-      around their last offer; chooses offer maximizing my_value * P(accept) with time pressure.
+    Negotiation agent (deadline haggling) with:
+    - Robust inference of incoming-offer convention (either "what we get" or "what speaker keeps").
+    - Particle belief over opponent unit-values constrained to match the known total value.
+    - Bayesian-ish updates from opponent offers and from their rejection of our last offer.
+    - Offer search using a bounded-knapsack DP that, for each achievable my_value, finds the offer
+      that is "best for opponent" under estimated opponent values (Pareto-friendly, higher accept rate).
     """
+
+    # ---------------------------- core setup ----------------------------
 
     def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
         self.me = int(me)
@@ -26,32 +24,29 @@ class Agent:
         self.total_int = sum(c * v for c, v in zip(self.counts, self.values))
         self.total = float(self.total_int)
 
-        # Our decision index (0..max_rounds-1)
-        self.t = 0
-
-        # Best offer value we've seen for us (incoming).
+        self.t = 0  # our action index (0..max_rounds-1)
         self.best_seen = 0
+        self.last_sent = None  # our share
 
-        # Opponent offer interpretation mode:
-        # - None: unknown, infer at first incoming offer
-        # - "as_is": incoming o is already our share
-        # - "complement": incoming o is opponent share / speaker-keeps, so our share is counts - o
-        self._mode = None
+        # Incoming offer convention probability:
+        # p_as: incoming o already denotes our share
+        # p_comp: incoming o denotes speaker's share, so our share is counts - o
+        self.p_as = 0.5
 
-        # Last offer we sent (our share), for rejection update.
-        self.last_sent = None
-
-        # Deterministic RNG seed.
-        seed = (sum(self.counts) * 1000003 + sum(self.values) * 9176 +
-                self.max_rounds * 131 + self.me * 7) & 0xFFFFFFFF
+        seed = (
+            1000003 * sum(self.counts)
+            + 9176 * sum(self.values)
+            + 131 * self.max_rounds
+            + 7 * self.me
+        ) & 0xFFFFFFFF
         self.rng = random.Random(seed)
 
-        self.particles, self.weights = self._init_particles(m=220)
+        self.particles, self.weights = self._init_particles(m=170)
 
-    # ----------------------------- helpers -----------------------------
+    # ----------------------------- utilities ----------------------------
 
     def _valid_offer(self, o) -> bool:
-        if not isinstance(o, list) or len(o) != self.n:
+        if not isinstance(o, (list, tuple)) or len(o) != self.n:
             return False
         for i, x in enumerate(o):
             if not isinstance(x, int):
@@ -63,12 +58,17 @@ class Agent:
     def _my_value(self, my_share: list[int]) -> int:
         return sum(v * x for v, x in zip(self.values, my_share))
 
-    def _global_progress(self) -> float:
-        """Progress in [0,1] across the whole game timeline (both players' turns)."""
+    def _opp_share(self, my_share: list[int]) -> list[int]:
+        return [self.counts[i] - my_share[i] for i in range(self.n)]
+
+    def _is_last_our_turn(self) -> bool:
+        return self.t >= self.max_rounds - 1
+
+    def _progress(self) -> float:
+        """Progress in [0,1] across full timeline of turns."""
         if self.max_rounds <= 1:
             return 1.0
-        denom = (2 * self.max_rounds - 1)
-        # Our move index occurs at time 2*t + me (me==1 means we act second in each round).
+        denom = 2 * self.max_rounds - 1
         g = (2 * self.t + self.me) / denom
         if g < 0.0:
             return 0.0
@@ -78,47 +78,68 @@ class Agent:
 
     @staticmethod
     def _sigmoid(z: float) -> float:
-        if z <= -30.0:
+        if z <= -35.0:
             return 0.0
-        if z >= 30.0:
+        if z >= 35.0:
             return 1.0
         return 1.0 / (1.0 + math.exp(-z))
 
-    def _to_my_share(self, o_raw: list[int]) -> list[int]:
-        """
-        Interpret incoming offer list as our share.
+    # -------------------------- incoming convention --------------------------
 
-        Many environments use "offer = what the speaker keeps".
-        The prompt text says "offer = what you get".
-        We infer which is being used from the first incoming offer by plausibility.
-        """
-        if self._mode is None:
-            # Two hypotheses:
-            as_is = o_raw
-            comp = [self.counts[i] - o_raw[i] for i in range(self.n)]
-            va = self._my_value(as_is)
-            vb = self._my_value(comp)
+    def _my_share_as_is(self, o_raw: list[int]) -> list[int]:
+        return list(o_raw)
 
-            # Heuristic: opponents rarely open by gifting us ~all our total value.
-            # If interpreting "as_is" yields an implausibly generous deal, flip.
-            if va > 0.75 * self.total and vb < va:
-                self._mode = "complement"
-            # Also, if "as_is" gives us literally everything (common greedy opening in speaker-keeps),
-            # then complement is almost certainly correct.
-            elif all(o_raw[i] == self.counts[i] for i in range(self.n)):
-                self._mode = "complement"
-            else:
-                self._mode = "as_is"
-
-        if self._mode == "as_is":
-            return o_raw[:]
-        # complement mode
+    def _my_share_complement(self, o_raw: list[int]) -> list[int]:
         return [self.counts[i] - o_raw[i] for i in range(self.n)]
 
-    def _opp_share(self, my_share: list[int]) -> list[int]:
-        return [self.counts[i] - my_share[i] for i in range(self.n)]
+    def _update_mode_posterior(self, o_raw: list[int]) -> None:
+        """Update p_as using how 'selfish/plausible' the raw offer looks for opponent under each mode."""
+        if self.total <= 0.0:
+            self.p_as = 0.5
+            return
 
-    # -------------------------- belief particles ------------------------
+        p = self._progress()
+        # We assume a typical opponent tries to keep at least ~ (0.62->0.42) of their total value over time.
+        keep_frac = 0.62 - 0.20 * p
+        theta = keep_frac * self.total
+        kscale = 0.10 * self.total + 1e-9
+        beta = 1.0  # already in theta/kscale; keep mild
+
+        # For each mode compute evidence = E_particles[ sigmoid((keep - theta)/kscale) ].
+        # If mode implies they keep high value, evidence rises.
+        # Mode "as_is": opponent keeps counts - o_raw
+        # Mode "comp": opponent keeps o_raw
+        ev_as = 0.0
+        ev_cp = 0.0
+        opp_as = self._opp_share(self._my_share_as_is(o_raw))
+        opp_cp = self._opp_share(self._my_share_complement(o_raw))
+
+        for w, u in zip(self.weights, self.particles):
+            keep_as = 0.0
+            keep_cp = 0.0
+            for i in range(self.n):
+                keep_as += opp_as[i] * u[i]
+                keep_cp += opp_cp[i] * u[i]
+            ev_as += w * self._sigmoid(beta * (keep_as - theta) / kscale)
+            ev_cp += w * self._sigmoid(beta * (keep_cp - theta) / kscale)
+
+        # Bayesian update with mild floor to avoid collapse from noise.
+        prior_as = self.p_as
+        prior_cp = 1.0 - self.p_as
+        like_as = 0.05 + 0.95 * ev_as
+        like_cp = 0.05 + 0.95 * ev_cp
+        post_as = prior_as * like_as
+        post_cp = prior_cp * like_cp
+        s = post_as + post_cp
+        self.p_as = 0.5 if s <= 1e-18 else (post_as / s)
+
+    def _map_my_share(self, o_raw: list[int]) -> list[int]:
+        """MAP interpretation of incoming raw offer."""
+        if self.p_as >= 0.5:
+            return self._my_share_as_is(o_raw)
+        return self._my_share_complement(o_raw)
+
+    # -------------------------- particle belief --------------------------
 
     def _scaled_from_weights(self, w: list[float]) -> list[float]:
         denom = 0.0
@@ -129,14 +150,14 @@ class Agent:
         s = self.total / denom
         return [max(0.0, wi * s) for wi in w]
 
-    def _init_particles(self, m: int = 220):
+    def _init_particles(self, m: int = 170):
         if self.total <= 0.0:
             return [[0.0] * self.n], [1.0]
 
         parts = []
         eps = 1e-6
 
-        # "Mostly one type matters" extremes.
+        # Extremes: one type dominates.
         for j in range(self.n):
             w = [eps] * self.n
             w[j] = 1.0
@@ -145,20 +166,22 @@ class Agent:
         # Uniform-ish.
         parts.append(self._scaled_from_weights([1.0] * self.n))
 
-        # Random smooth particles.
+        # Random smooth particles (Exp(1) -> normalized).
         while len(parts) < m:
             w = []
             for _ in range(self.n):
                 u = self.rng.random()
-                w.append(-math.log(max(1e-12, u)))  # Exp(1)
+                w.append(-math.log(max(1e-12, u)))
             parts.append(self._scaled_from_weights(w))
 
         wts = [1.0 / len(parts)] * len(parts)
         return parts, wts
 
     def _renormalize(self) -> None:
-        s = sum(self.weights)
-        if not (s > 0.0) or math.isnan(s) or math.isinf(s):
+        s = 0.0
+        for w in self.weights:
+            s += w
+        if not (s > 0.0) or math.isinf(s) or math.isnan(s):
             k = len(self.weights)
             self.weights = [1.0 / k] * k
             return
@@ -174,82 +197,80 @@ class Agent:
 
     # -------------------------- belief updates --------------------------
 
-    def _update_from_their_offer(self, my_share: list[int]) -> None:
-        """They proposed this split; likely they keep items they value."""
-        if self.total <= 0.0:
-            return
-
-        beta = 5.5
-        opp = self._opp_share(my_share)
-
-        for k, u in enumerate(self.particles):
-            keep_val = 0.0
-            for i in range(self.n):
-                keep_val += opp[i] * u[i]
-            # Margin is positive if they keep > half their value.
-            margin = (2.0 * keep_val - self.total) / (self.total + 1e-12)
-            like = self._sigmoid(beta * margin)
-            self.weights[k] *= 0.12 + 0.88 * like
-
-        self._renormalize()
-
-    def _opp_threshold_frac(self, p: float) -> float:
-        # Opponent acceptance threshold prior; decays over time.
-        # Slightly firmer early than the old code; still drops to a deal-friendly level.
-        return 0.76 - 0.51 * p  # 0.76 -> 0.25
-
     def _update_from_rejection_of_last(self) -> None:
-        """If they made a new offer, they rejected our previous one; penalize particles that imply acceptance."""
         if self.last_sent is None or self.total <= 0.0:
             return
 
-        p = self._global_progress()
-        theta = self._opp_threshold_frac(p) * self.total
-        kscale = 0.085 * self.total + 1e-9
-        gamma = 1.35
+        p = self._progress()
+        # Opp acceptance threshold drifts down over time.
+        theta = (0.74 - 0.45 * p) * self.total
+        kscale = 0.09 * self.total + 1e-9
 
         opp = self._opp_share(self.last_sent)
-        for idx, u in enumerate(self.particles):
-            keep_val = 0.0
+        for k, u in enumerate(self.particles):
+            keep = 0.0
             for i in range(self.n):
-                keep_val += opp[i] * u[i]
-            p_accept = self._sigmoid((keep_val - theta) / kscale)
-            rej_like = max(1e-6, 1.0 - p_accept)
-            self.weights[idx] *= rej_like ** gamma
+                keep += opp[i] * u[i]
+            p_acc = self._sigmoid((keep - theta) / kscale)
+            # Rejection likelihood ~ (1 - p_acc) with a mild exponent.
+            self.weights[k] *= max(1e-6, 1.0 - p_acc) ** 1.25
+        self._renormalize()
+
+    def _update_from_their_offer_raw(self, o_raw: list[int]) -> None:
+        """Mixture update across the two possible incoming conventions using current p_as."""
+        if self.total <= 0.0:
+            return
+
+        p = self._progress()
+        # Likelihood that opponent would propose such a split if they are somewhat self-interested.
+        theta = (0.78 - 0.42 * p) * self.total
+        kscale = 0.10 * self.total + 1e-9
+
+        my_as = self._my_share_as_is(o_raw)
+        my_cp = self._my_share_complement(o_raw)
+        opp_as = self._opp_share(my_as)
+        opp_cp = self._opp_share(my_cp)
+
+        p_as = self.p_as
+        p_cp = 1.0 - p_as
+
+        for k, u in enumerate(self.particles):
+            keep_as = 0.0
+            keep_cp = 0.0
+            for i in range(self.n):
+                keep_as += opp_as[i] * u[i]
+                keep_cp += opp_cp[i] * u[i]
+            like_as = 0.10 + 0.90 * self._sigmoid((keep_as - theta) / kscale)
+            like_cp = 0.10 + 0.90 * self._sigmoid((keep_cp - theta) / kscale)
+            self.weights[k] *= (p_as * like_as + p_cp * like_cp)
 
         self._renormalize()
 
-    # ------------------------- accept / concede -------------------------
-
-    def _is_last_our_turn(self) -> bool:
-        return self.t >= self.max_rounds - 1
+    # ---------------------- acceptance / thresholds ----------------------
 
     def _my_floor(self) -> float:
         if self.total <= 0.0:
             return 0.0
 
-        p = self._global_progress()
+        p = self._progress()
         last = self._is_last_our_turn()
 
-        # If we are second on our last turn, counter-offer can't be accepted (no more turns),
-        # so accept anything valid.
+        # If we are second on our last turn, we cannot make a counter that can be accepted.
         if last and self.me == 1:
             return 0.0
 
-        # Concession schedule.
-        frac = 0.92 - 0.62 * p  # 0.92 -> 0.30
-
-        # If we are first and it's our final chance to propose, allow a bit lower to close.
+        # Firm early, concede with time.
+        frac = 0.97 - 0.67 * (p ** 1.15)  # ~0.97 -> ~0.30
         if last and self.me == 0:
-            frac = min(frac, 0.20)
+            frac = min(frac, 0.18)
 
         floor = frac * self.total
 
-        # Don't collapse far below best seen unless quite late.
-        floor = max(floor, self.best_seen - (0.10 + 0.22 * p) * self.total)
+        # Don't accept far below the best we plausibly saw, unless quite late.
+        floor = max(floor, self.best_seen - (0.08 + 0.25 * p) * self.total)
 
-        # Avoid accepting tiny deals in non-terminal situations.
-        floor = max(floor, 0.14 * self.total)
+        # Avoid tiny deals except in terminal situations.
+        floor = max(floor, 0.12 * self.total)
 
         if floor < 0.0:
             return 0.0
@@ -257,203 +278,206 @@ class Agent:
             return self.total
         return floor
 
-    # --------------------- opponent acceptance model --------------------
-
     def _p_opp_accept(self, my_share: list[int]) -> float:
         if self.total <= 0.0:
             return 1.0
-
-        p = self._global_progress()
-        theta = self._opp_threshold_frac(p) * self.total
-        kscale = 0.085 * self.total + 1e-9
+        p = self._progress()
+        theta = (0.72 - 0.44 * p) * self.total
+        kscale = 0.09 * self.total + 1e-9
 
         opp = self._opp_share(my_share)
-
         acc = 0.0
         for w, u in zip(self.weights, self.particles):
-            keep_val = 0.0
+            keep = 0.0
             for i in range(self.n):
-                keep_val += opp[i] * u[i]
-            acc += w * self._sigmoid((keep_val - theta) / kscale)
+                keep += opp[i] * u[i]
+            acc += w * self._sigmoid((keep - theta) / kscale)
         return acc
 
-    # -------------------------- offer generation ------------------------
+    # -------------------------- offer generation --------------------------
 
     def _base_take(self) -> list[int]:
-        # Take all items we value positively; give away all zero-value items.
+        # Take all items that are positive to us; never take zero-value items (they help opponent accept).
         return [self.counts[i] if self.values[i] > 0 else 0 for i in range(self.n)]
 
-    def _ratio_order(self, opp_mu: list[float]) -> list[int]:
-        eps = 1e-9
-        idxs = [i for i in range(self.n) if self.counts[i] > 0 and self.values[i] > 0]
-        # Concede types where it's cheap to us and likely valuable to them (high opp_mu / our_value).
-        idxs.sort(key=lambda i: opp_mu[i] / (self.values[i] + eps), reverse=True)
-        return idxs
+    def _dp_best_for_opp_given_my_value(self, opp_mu: list[float]):
+        """
+        Bounded knapsack DP minimizing 'opp_loss' = sum(x_i * opp_mu[i]) for each achievable my_value,
+        where x_i is how many units we take of type i.
 
-    def _greedy_to_value(self, target: float, opp_mu: list[float]) -> list[int]:
-        """Start from base and concede 1 unit at a time guided by opp_mu/our_value until my_value<=target."""
-        o = self._base_take()
-        myv = self._my_value(o)
-        if myv <= target:
-            return o
+        Returns:
+          types: indices of types included in DP (values[i] > 0 and count>0)
+          dp_loss: list[float] of size V+1, inf if unreachable
+          prevs, takes: backpointers per stage to reconstruct an offer for any reachable value.
+        """
+        V = self.total_int
+        INF = 1e100
 
-        order = self._ratio_order(opp_mu)
-        if not order:
-            return o
+        types = [i for i in range(self.n) if self.counts[i] > 0 and self.values[i] > 0]
+        if not types or V <= 0:
+            dp_loss = [0.0] + [INF] * V
+            return types, dp_loss, [], []
 
-        # Concede one unit at a time; bounded for safety.
-        for _ in range(sum(self.counts) + 5):
-            if myv <= target:
-                break
-            best_i = -1
-            best_ratio = -1.0
-            for i in order:
-                if o[i] <= 0:
+        dp = [INF] * (V + 1)
+        dp[0] = 0.0
+
+        prevs = []
+        takes = []
+
+        for idx in types:
+            c = self.counts[idx]
+            mv = self.values[idx]
+            ov = float(opp_mu[idx])
+
+            new = [INF] * (V + 1)
+            prev = [-1] * (V + 1)
+            take = [0] * (V + 1)
+
+            for v0 in range(V + 1):
+                base = dp[v0]
+                if base >= INF:
                     continue
-                r = opp_mu[i] / (self.values[i] + 1e-9)
-                if r > best_ratio:
-                    best_ratio = r
-                    best_i = i
-            if best_i < 0:
-                break
-            o[best_i] -= 1
-            myv -= self.values[best_i]
+                # try x = 0..c
+                # v = v0 + x*mv
+                # loss = base + x*ov
+                for x in range(c + 1):
+                    v = v0 + x * mv
+                    if v > V:
+                        break
+                    loss = base + x * ov
+                    if loss + 1e-12 < new[v]:
+                        new[v] = loss
+                        prev[v] = v0
+                        take[v] = x
 
-        return o
+            dp = new
+            prevs.append(prev)
+            takes.append(take)
 
-    def _path_concessions(self, opp_mu: list[float]) -> list[list[int]]:
-        """Generate offers along a concession path (in units conceded)."""
-        base = self._base_take()
-        order = self._ratio_order(opp_mu)
-        if not order:
-            return [base]
+        return types, dp, prevs, takes
 
-        # Total units we could concede from base (only positive-value types included).
-        total_units = sum(base[i] for i in range(self.n))
+    def _reconstruct_offer(self, types, prevs, takes, v_target: int) -> list[int]:
+        my_share = [0] * self.n
+        v = v_target
+        for stage in range(len(types) - 1, -1, -1):
+            idx = types[stage]
+            x = takes[stage][v]
+            my_share[idx] = x
+            v = prevs[stage][v] if v >= 0 else 0
 
-        # Steps: more dense early, sparser later.
-        steps = [0, 1, 2, 3, 4, 6, 8, 10, 13, 16, 20, 25, 30, 36, 45, 60, 80, 110]
-        steps = [k for k in steps if k <= total_units]
-        if steps and steps[-1] != total_units:
-            steps.append(total_units)
-
-        offers = []
-        for k in steps:
-            o = base[:]
-            left = k
-            # Concede k units following order cyclically (so we don't dump all of one type only).
-            # This keeps offers "smooth" and often more acceptable.
-            j = 0
-            while left > 0 and j < 100000:
-                i = order[j % len(order)]
-                if o[i] > 0:
-                    o[i] -= 1
-                    left -= 1
-                j += 1
-            offers.append(o)
-
-        return offers
-
-    def _random_offer(self, opp_mu: list[float]) -> list[int]:
-        """Random concession offer biased toward giving opponent high opp_mu/our_value items, increasing with time."""
-        p = self._global_progress()
-        o = self._base_take()
-        eps = 1e-9
-
+        # Always give away our zero-value items
         for i in range(self.n):
-            if o[i] <= 0:
-                continue
+            if self.values[i] <= 0:
+                my_share[i] = 0
+        return my_share
 
-            ratio = opp_mu[i] / (self.values[i] + eps)
-            base = ratio / (1.0 + ratio)  # 0..1
-
-            # Intensity increases with time.
-            inten = (0.08 + 0.80 * p) * base
-
-            r = self.rng.random()
-            r = r ** (2.0 - 1.2 * p)  # earlier -> smaller, later -> larger
-            give = int((inten * r) * (o[i] + 0.75))
-            if give > 0:
-                o[i] = max(0, o[i] - min(o[i], give))
-
-        return o
-
-    def _tweak_ask_more(self, their_my_share: list[int], k: int = 1) -> list[int]:
-        """Ask for slightly more than their offer in our highest-value types."""
-        o = their_my_share[:]
-        # Always give away our zero-value items.
+    def _tweak_ask_more(self, my_share: list[int], k: int = 1) -> list[int]:
+        o = list(my_share)
         for i in range(self.n):
             if self.values[i] <= 0:
                 o[i] = 0
-
+        # ask +k in our most valuable available type
         idxs = list(range(self.n))
         idxs.sort(key=lambda i: self.values[i], reverse=True)
         for i in idxs:
-            if self.values[i] <= 0:
-                continue
-            if o[i] < self.counts[i]:
+            if self.values[i] > 0 and o[i] < self.counts[i]:
                 o[i] = min(self.counts[i], o[i] + k)
                 break
         return o
 
-    def _choose_counter(self, their_my_share: list[int] | None) -> list[int]:
-        if self.total <= 0.0:
+    def _midpoint_offer(self, a: list[int], b: list[int]) -> list[int]:
+        o = [0] * self.n
+        for i in range(self.n):
+            o[i] = (a[i] + b[i]) // 2
+            if self.values[i] <= 0:
+                o[i] = 0
+        return o
+
+    def _choose_counter(self, their_raw: list[int] | None) -> list[int]:
+        if self.total_int <= 0:
             return [0] * self.n
 
-        p = self._global_progress()
+        p = self._progress()
         floor = self._my_floor()
+        floor_i = int(math.ceil(floor - 1e-9))
         opp_mu = self._mean_opp_unit()
-        last = self._is_last_our_turn()
 
+        # DP efficient offers
+        types, dp_loss, prevs, takes = self._dp_best_for_opp_given_my_value(opp_mu)
+        reachable = [x < 1e80 for x in dp_loss]
+
+        def best_reachable_at_or_below(v: int) -> int | None:
+            if v < 0:
+                return None
+            if v > self.total_int:
+                v = self.total_int
+            for vv in range(v, -1, -1):
+                if reachable[vv]:
+                    return vv
+            return None
+
+        # Candidate my_value targets (high -> lower), plus around floor.
+        fracs = [0.99, 0.97, 0.95, 0.92, 0.89, 0.85, 0.80, 0.75, 0.70, 0.65, 0.60,
+                 0.55, 0.50, 0.46, 0.42, 0.38, 0.34, 0.30, 0.26, 0.22, 0.18]
+        targets = {self.total_int, max(0, min(self.total_int, floor_i))}
+        for f in fracs:
+            targets.add(int(self.total_int * f))
+
+        their_map = None
+        if their_raw is not None:
+            their_map = self._map_my_share(their_raw)
+            targets.add(self._my_value(their_map))
+            targets.add(max(0, self._my_value(their_map) - int(0.06 * self.total)))
+
+        # Build candidate offers
         cand = {}
-        def add(x):
+
+        def add(x: list[int]):
             if self._valid_offer(x):
                 cand[tuple(x)] = x
 
-        # Value targets: anchor high early, drift toward floor.
-        high = max(floor, (0.98 - 0.25 * p) * self.total)
-        for s in (0.0, 0.06, 0.12, 0.20, 0.30, 0.42):
-            tgt = max(floor, high - s * self.total)
-            add(self._greedy_to_value(tgt, opp_mu))
+        add(self._base_take())
+        if their_map is not None:
+            add(their_map)
+            add(self._tweak_ask_more(their_map, 1))
+            if p < 0.75:
+                add(self._tweak_ask_more(their_map, 2))
 
-        # Concession path (fast Pareto-ish set).
-        for off in self._path_concessions(opp_mu):
+        # DP-driven offers (Pareto-friendly for opponent at each my_value)
+        for tval in sorted(targets, reverse=True):
+            if tval < floor_i:
+                continue
+            vv = best_reachable_at_or_below(tval)
+            if vv is None or vv < floor_i:
+                continue
+            off = self._reconstruct_offer(types, prevs, takes, vv)
             add(off)
 
-        # Random exploration (less near the end for stability).
-        n_rand = 65 if p < 0.7 else 40
-        for _ in range(n_rand):
-            add(self._random_offer(opp_mu))
+        # Include some compromise midpoints near their offer and our base / last.
+        base = self._base_take()
+        if their_map is not None:
+            add(self._midpoint_offer(base, their_map))
+        if self.last_sent is not None and their_map is not None:
+            add(self._midpoint_offer(self.last_sent, their_map))
 
-        # Include their offer (as our-share) and small tweaks.
-        if their_my_share is not None:
-            add(their_my_share)
-            add(self._tweak_ask_more(their_my_share, k=1))
-            if p < 0.8:
-                add(self._tweak_ask_more(their_my_share, k=2))
-
-        # Score candidates.
+        # Score candidates by (approx) expected value of immediate acceptance.
         best = None
-        best_score = -1e100
+        best_score = -1.0
 
         for off in cand.values():
             myv = self._my_value(off)
-
-            # Enforce our floor unless we must accept/can't counter (handled elsewhere).
-            if myv + 1e-9 < floor and not (last and self.me == 1):
+            if myv + 1e-9 < floor:
                 continue
-
             pacc = self._p_opp_accept(off)
 
-            # Time pressure: late game emphasizes closing probability.
-            w = 0.48 + 0.44 * p
-            # Use a mildly concave transform early; closer to linear late.
-            pterm = pacc ** (0.85 - 0.35 * p)
+            # Main objective: myv * p(accept)
+            score = myv * pacc
 
-            score = myv * ((1.0 - w) + w * pterm)
+            # Mild late-game closing preference.
+            score += (0.02 + 0.06 * p) * self.total * pacc
 
-            # Late bonus for "very likely" closers.
-            score += (0.015 + 0.06 * p) * self.total * pacc
+            # Slight preference for higher myv when pacc ties.
+            score += 1e-6 * myv
 
             if score > best_score:
                 best_score = score
@@ -462,13 +486,13 @@ class Agent:
         if best is None:
             best = self._base_take()
 
-        self.last_sent = best[:]
+        self.last_sent = list(best)
         return best
 
     # -------------------------------- API --------------------------------
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        # Degenerate: nothing is worth anything to us.
+        # If everything is worthless to us: accept any valid offer.
         if self.total_int <= 0:
             if o is not None and self._valid_offer(o):
                 return None
@@ -476,43 +500,70 @@ class Agent:
 
         last = self._is_last_our_turn()
 
-        # Process incoming offer (if any).
-        their_my_share = None
         if o is not None:
             if not self._valid_offer(o):
-                # Reply safely with a valid counter.
+                # Safe valid counter.
                 counter = self._choose_counter(None)
                 self.t += 1
                 return counter
 
-            their_my_share = self._to_my_share(o)
-            myv = self._my_value(their_my_share)
-            if myv > self.best_seen:
-                self.best_seen = myv
+            o_raw = list(o)
 
-            # If this is a new opponent offer, they rejected our previous offer (if any).
+            # Rejection signal: opponent made a new offer => rejected our last one (if any).
             self._update_from_rejection_of_last()
-            self._update_from_their_offer(their_my_share)
 
-            # If we are second on our final turn, never counter (a counter cannot be accepted).
+            # Update incoming convention belief, then update opponent valuation particles.
+            self._update_mode_posterior(o_raw)
+            self._update_from_their_offer_raw(o_raw)
+
+            # Evaluate offer under both possible conventions (to avoid catastrophic accept if uncertain).
+            my_as = self._my_share_as_is(o_raw)
+            my_cp = self._my_share_complement(o_raw)
+            v_as = self._my_value(my_as)
+            v_cp = self._my_value(my_cp)
+
+            # Track best plausible seen (optimistic).
+            self.best_seen = max(self.best_seen, v_as, v_cp)
+
+            floor = self._my_floor()
+
+            # If we are second on final turn, we must accept or end with 0 anyway.
             if last and self.me == 1:
-                self.t += 1
-                return None
-
-            # Standard accept rule.
-            if myv + 1e-9 >= self._my_floor():
-                self.t += 1
-                return None
-
-            # Late-game extra safety: accept solid offers that are likely to close anyway.
-            if self._global_progress() > 0.78:
-                if myv >= 0.40 * self.total and self._p_opp_accept(their_my_share) > 0.94:
+                # Accept if the posterior-expected value is non-trivial (or if any interpretation is good).
+                expv = self.p_as * v_as + (1.0 - self.p_as) * v_cp
+                if expv >= 0.10 * self.total or max(v_as, v_cp) >= floor:
                     self.t += 1
                     return None
-        else:
-            # We start the negotiation.
-            self.last_sent = None
+                # Even if low, accepting doesn't hurt vs 0; accept to avoid mistakes.
+                self.t += 1
+                return None
 
-        counter = self._choose_counter(their_my_share)
+            # Standard acceptance: accept if (a) both interpretations meet floor, OR
+            # (b) the most likely mode meets floor with decent confidence.
+            p_as = self.p_as
+            if min(v_as, v_cp) + 1e-9 >= floor:
+                self.t += 1
+                return None
+            if p_as >= 0.78 and v_as + 1e-9 >= floor:
+                self.t += 1
+                return None
+            if p_as <= 0.22 and v_cp + 1e-9 >= floor:
+                self.t += 1
+                return None
+
+            # Late-game: accept solid deals even if slightly below floor.
+            if self._progress() > 0.80:
+                expv = p_as * v_as + (1.0 - p_as) * v_cp
+                if expv >= 0.38 * self.total:
+                    self.t += 1
+                    return None
+
+            counter = self._choose_counter(o_raw)
+            self.t += 1
+            return counter
+
+        # We start / no incoming offer.
+        self.last_sent = None
+        counter = self._choose_counter(None)
         self.t += 1
         return counter

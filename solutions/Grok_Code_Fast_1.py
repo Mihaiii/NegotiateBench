@@ -9,7 +9,7 @@ class Agent:
 
     def offer(self, o: list[int] | None) -> list[int] | None:
         thresh_fraction = min(1.0, self.step / self.max_turns) if self.max_turns > 0 else 0
-        thresh = self.total * (0.9 - thresh_fraction * 0.4)  # Start at 90%, end at 50%
+        thresh = self.total * (0.7 - thresh_fraction * 0.4)  # Start at 70%, end at 30%
         if o is not None:
             offered_value = sum(o[i] * self.values[i] for i in range(len(o)))
             if offered_value >= thresh:

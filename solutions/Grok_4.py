@@ -52,10 +52,7 @@ class Agent:
         if o is not None:
             self.partner_offers.append(o)
         is_last_turn = remaining == 0
-        if self.me == 0:
-            is_penultimate = remaining == 1
-        else:
-            is_penultimate = remaining == 2
+        is_penultimate = (self.me == 0 and remaining == 1) or (self.me == 1 and remaining == 2)
         progress = current_turn / self.max_turns if self.max_turns > 0 else 1.0
         v_partner = self.estimate_v_partner()
         if is_last_turn:
@@ -64,12 +61,9 @@ class Agent:
         elif is_penultimate:
             min_accept = self.total / 2
             max_unit = max((v_partner[i] for i in range(self.n_types) if self.counts[i] > 0), default=0)
-            if self.me == 0:
-                partner_threshold = max_unit * 0.1 if max_unit > 0 else 0
-            else:
-                partner_threshold = self.total / 2
+            partner_threshold = max_unit * 0.1 if max_unit > 0 else 0
         else:
-            power = 3
+            power = 4
             f = 1 - progress ** power
             my_share_frac = 0.5 + 0.5 * f
             min_accept = self.total * my_share_frac

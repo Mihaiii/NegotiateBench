@@ -1,5 +1,6 @@
 import os
 import random
+import multiprocessing
 
 from misc.io import get_current_code
 
@@ -258,6 +259,109 @@ def calculate_profit(items, values):
     return sum(items[i] * values[i] for i in range(len(items)))
 
 
+def _run_model_pair_task(args):
+    model_0, model_1, negotiation_data_local, num_samples_local = args
+    display_name_0 = model_0["display_name"]
+    display_name_1 = model_1["display_name"]
+    Agent0Class = load_agent_class(display_name_0)
+    if Agent0Class is None:
+        print(f"Skipping {display_name_0}: no valid agent found")
+        return {}, {}
+    Agent1Class = load_agent_class(display_name_1)
+    if Agent1Class is None:
+        print(f"Skipping opponent {display_name_1}: no valid agent found")
+        return {}, {}
+
+    pair_results = {
+        display_name_0: {"total_profit": 0},
+        display_name_1: {"total_profit": 0},
+    }
+    pair_battle_scenarios = {}
+    pair_scenario_counts = {}
+
+    canonical_key = tuple(sorted([display_name_0, display_name_1]))
+    pair_battle_scenarios[canonical_key] = []
+    pair_scenario_counts[canonical_key] = {
+        "as_agent_0": 0,
+        "as_agent_1": 0,
+    }
+
+    ref_model = canonical_key[0]
+    max_as_agent_0 = (num_samples_local + 1) // 2
+    max_as_agent_1 = num_samples_local // 2
+
+    orders = [
+        (display_name_0, display_name_1, Agent0Class, Agent1Class),
+        (display_name_1, display_name_0, Agent1Class, Agent0Class),
+    ]
+
+    for name_0, name_1, AgentClass0, AgentClass1 in orders:
+        print(f"\nBattle: {name_0} vs {name_1}")
+
+        for scenario in negotiation_data_local:
+            counts = scenario["counts"]
+            values_0 = scenario["player_0"]
+            values_1 = scenario["player_1"]
+            max_rounds = scenario["rounds"]
+
+            try:
+                agent_0 = AgentClass0(0, counts, values_0, max_rounds)
+                agent_1 = AgentClass1(1, counts, values_1, max_rounds)
+
+                items_0, items_1, outcome, turn_history = run_negotiation(
+                    agent_0,
+                    agent_1,
+                    counts,
+                    max_rounds,
+                    name_0,
+                    name_1,
+                )
+
+                profit_0 = calculate_profit(items_0, values_0)
+                profit_1 = calculate_profit(items_1, values_1)
+
+                pair_results[name_0]["total_profit"] += profit_0
+                pair_results[name_1]["total_profit"] += profit_1
+
+                print(
+                    f"  Scenario result: {outcome}, profits: {name_0}={profit_0}, {name_1}={profit_1}"
+                )
+
+                if name_0 == ref_model:
+                    position_key = "as_agent_0"
+                    max_for_position = max_as_agent_0
+                else:
+                    position_key = "as_agent_1"
+                    max_for_position = max_as_agent_1
+
+                if (
+                    num_samples_local > 0
+                    and pair_scenario_counts[canonical_key][position_key]
+                    < max_for_position
+                ):
+                    scenario_with_names = {
+                        "counts": scenario["counts"],
+                        "rounds": scenario["rounds"],
+                        f"{name_0} values": scenario["player_0"],
+                        f"{name_1} values": scenario["player_1"],
+                    }
+                    pair_battle_scenarios[canonical_key].append(
+                        {
+                            "scenario": scenario_with_names,
+                            "outcome": outcome,
+                            f"{name_0} profit": profit_0,
+                            f"{name_1} profit": profit_1,
+                            "turn_history": turn_history,
+                        }
+                    )
+                    pair_scenario_counts[canonical_key][position_key] += 1
+
+            except Exception as e:
+                print(f"  Error in scenario: {e}")
+
+    return pair_results, pair_battle_scenarios
+
+
 def run_battles(
     models: list[dict],
     negotiation_data: list[dict],
@@ -284,136 +388,62 @@ def run_battles(
             - '{model_y} profit': profit achieved by model_y
             - 'turn_history': list of offers per round with '{model_name} offer' keys
     """
-    # Get num_samples from environment variable if available
     try:
         num_samples = int(os.getenv("NUM_SAMPLES", str(num_samples)))
     except ValueError:
         pass
 
     results = {}
-    # Track scenarios for each model pair
-    # Key: (model_X, model_Y), Value: list of scenario dicts
     battle_scenarios = {}
-    # Track counts for limiting samples: key -> {'as_agent_0': count, 'as_agent_1': count}
-    scenario_counts = {}
-
-    # Initialize results for all models
     for model in models:
         display_name = model["display_name"]
         results[display_name] = {
             "total_profit": 0,
         }
 
-    # Run each model against every other model
+    tasks = []
     for i, model_0 in enumerate(models):
-        display_name_0 = model_0["display_name"]
-        Agent0Class = load_agent_class(display_name_0)
+        for j in range(i + 1, len(models)):
+            model_1 = models[j]
+            tasks.append((model_0, model_1, negotiation_data, num_samples))
 
-        if Agent0Class is None:
-            print(f"Skipping {display_name_0}: no valid agent found")
-            continue
+    max_processes = os.getenv("NUM_PROCESSES")
+    try:
+        max_processes = int(max_processes) if max_processes is not None else None
+    except ValueError:
+        max_processes = None
 
-        for j, model_1 in enumerate(models):
-            if i == j:
-                continue  # Don't play against itself
+    cpu_count = multiprocessing.cpu_count()
+    if max_processes is None:
+        processes = min(8, cpu_count)
+    else:
+        processes = max(1, min(max_processes, cpu_count))
 
-            display_name_1 = model_1["display_name"]
-            Agent1Class = load_agent_class(display_name_1)
-
-            if Agent1Class is None:
-                print(f"Skipping opponent {display_name_1}: no valid agent found")
-                continue
-
-            print(f"\nBattle: {display_name_0} vs {display_name_1}")
-
-            # Run through all negotiation scenarios
-            for scenario in negotiation_data:
-                counts = scenario["counts"]
-                values_0 = scenario["player_0"]
-                values_1 = scenario["player_1"]
-                max_rounds = scenario["rounds"]
-
-                try:
-                    # Create agent instances
-                    # me=0 means agent goes first, me=1 means agent goes second
-                    agent_0 = Agent0Class(0, counts, values_0, max_rounds)
-                    agent_1 = Agent1Class(1, counts, values_1, max_rounds)
-
-                    # Run the negotiation
-                    items_0, items_1, outcome, turn_history = run_negotiation(
-                        agent_0,
-                        agent_1,
-                        counts,
-                        max_rounds,
-                        display_name_0,
-                        display_name_1,
-                    )
-
-                    # Calculate profits
-                    profit_0 = calculate_profit(items_0, values_0)
-                    profit_1 = calculate_profit(items_1, values_1)
-
-                    # Update results (max_possible_profit was set at initialization)
-                    results[display_name_0]["total_profit"] += profit_0
-                    results[display_name_1]["total_profit"] += profit_1
-
-                    print(
-                        f"  Scenario result: {outcome}, profits: {display_name_0}={profit_0}, {display_name_1}={profit_1}"
-                    )
-
-                    # Store battle scenario with proper structure
-                    # Use sorted tuple as canonical key to group both orderings
-                    canonical_key = tuple(sorted([display_name_0, display_name_1]))
-
-                    if canonical_key not in battle_scenarios:
-                        battle_scenarios[canonical_key] = []
-                        scenario_counts[canonical_key] = {
-                            "as_agent_0": 0,
-                            "as_agent_1": 0,
-                        }
-
-                    # Determine if we can add this scenario
-                    # model at canonical_key[0] is our reference model
-                    # Check if current model_0 matches canonical_key[0]
-                    ref_model = canonical_key[0]
-                    # Use ceiling division for as_agent_0 to ensure both positions
-                    # get at least 1 sample when num_samples >= 2
-                    # e.g., num_samples=3 -> as_agent_0=2, as_agent_1=1
-                    #       num_samples=2 -> as_agent_0=1, as_agent_1=1
-                    #       num_samples=1 -> as_agent_0=1, as_agent_1=0
-                    max_as_agent_0 = (num_samples + 1) // 2  # ceiling division
-                    max_as_agent_1 = num_samples // 2  # floor division
-                    if display_name_0 == ref_model:
-                        # ref_model is agent_0 in this battle
-                        position_key = "as_agent_0"
-                        max_for_position = max_as_agent_0
+    if processes == 1 or not tasks:
+        for task in tasks:
+            pair_results, pair_battle_scenarios = _run_model_pair_task(task)
+            for name, data in pair_results.items():
+                if name in results:
+                    results[name]["total_profit"] += data["total_profit"]
+                else:
+                    results[name] = {"total_profit": data["total_profit"]}
+            for key, scenarios in pair_battle_scenarios.items():
+                if key not in battle_scenarios:
+                    battle_scenarios[key] = []
+                battle_scenarios[key].extend(scenarios)
+    else:
+        with multiprocessing.Pool(processes=processes) as pool:
+            for pair_results, pair_battle_scenarios in pool.imap_unordered(
+                _run_model_pair_task, tasks
+            ):
+                for name, data in pair_results.items():
+                    if name in results:
+                        results[name]["total_profit"] += data["total_profit"]
                     else:
-                        # ref_model is agent_1 in this battle
-                        position_key = "as_agent_1"
-                        max_for_position = max_as_agent_1
-
-                    # Only add if we haven't reached the limit for this position
-                    if scenario_counts[canonical_key][position_key] < max_for_position:
-                        # Transform scenario to use model names instead of player_0/player_1
-                        scenario_with_names = {
-                            "counts": scenario["counts"],
-                            "rounds": scenario["rounds"],
-                            f"{display_name_0} values": scenario["player_0"],
-                            f"{display_name_1} values": scenario["player_1"],
-                        }
-                        battle_scenarios[canonical_key].append(
-                            {
-                                "scenario": scenario_with_names,
-                                "outcome": outcome,
-                                f"{display_name_0} profit": profit_0,
-                                f"{display_name_1} profit": profit_1,
-                                "turn_history": turn_history,
-                            }
-                        )
-                        scenario_counts[canonical_key][position_key] += 1
-
-                except Exception as e:
-                    print(f"  Error in scenario: {e}")
-                    # Still count the scenario but with 0 profit (max_possible_profit was already set)
+                        results[name] = {"total_profit": data["total_profit"]}
+                for key, scenarios in pair_battle_scenarios.items():
+                    if key not in battle_scenarios:
+                        battle_scenarios[key] = []
+                    battle_scenarios[key].extend(scenarios)
 
     return results, battle_scenarios

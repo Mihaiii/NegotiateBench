@@ -68,7 +68,7 @@ def push():
     return commit_hash
 
 
-def get_code_link(commit_hash: str, model_name: str) -> str:
+def get_code_link_at_commit(commit_hash: str, model_name: str) -> str:
     """
     Generate a GitHub link to the model's solution file at a specific commit.
 
@@ -94,6 +94,20 @@ def get_code_link(commit_hash: str, model_name: str) -> str:
     # Build the link
     code_link = f"{origin_url}/blob/{commit_hash}/solutions/{sanitized_display_name}.py"
     return code_link
+
+
+def get_solution_code_link(model_name: str) -> str:
+    origin_url = _repo.remotes.origin.url
+    if origin_url.startswith("git@github.com:"):
+        origin_url = origin_url.replace("git@github.com:", "https://github.com/")
+    if origin_url.endswith(".git"):
+        origin_url = origin_url[:-4]
+    try:
+        branch = _repo.active_branch.name
+    except Exception:
+        branch = "main"
+    sanitized_display_name = sanitize(model_name)
+    return f"{origin_url}/blob/{branch}/solutions/{sanitized_display_name}.py"
 
 
 # Get the newest commit for each file in the solutions folder and return the newest commit overall

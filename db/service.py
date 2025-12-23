@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import psycopg2
 from dotenv import load_dotenv
 
-from misc.git import get_code_link
+from misc.git import get_code_link_at_commit, get_solution_code_link
 
 # Load environment variables from .env file
 load_dotenv()
@@ -79,6 +79,74 @@ def get_leaderboard_rank_and_model_latest_session():
     return results
 
 
+def get_negotiations_leaderboard_latest():
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL environment variable must be set")
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            SELECT rank, model_name, profit_percentage, max_possible_profit, total_profit, code_link
+            FROM negotiations_leaderboard_latest
+            ORDER BY rank;
+            """
+        )
+        rows = cursor.fetchall()
+        results = [
+            {
+                "rank": row[0],
+                "model_name": row[1],
+                "profit_percentage": float(row[2]),
+                "max_possible_profit": float(row[3]),
+                "total_profit": float(row[4]),
+                "code_link": row[5],
+            }
+            for row in rows
+        ]
+    finally:
+        cursor.close()
+        conn.close()
+
+    return results
+
+
+def get_negotiations_leaderboard_all():
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL environment variable must be set")
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            SELECT rank, model_name, profit_percentage, max_possible_profit, total_profit
+            FROM negotiations_leaderboard
+            ORDER BY rank;
+            """
+        )
+        rows = cursor.fetchall()
+        results = [
+            {
+                "rank": row[0],
+                "model_name": row[1],
+                "profit_percentage": float(row[2]),
+                "max_possible_profit": float(row[3]),
+                "total_profit": float(row[4]),
+                "code_link": get_solution_code_link(row[1]),
+            }
+            for row in rows
+        ]
+    finally:
+        cursor.close()
+        conn.close()
+
+    return results
+
+
 def get_samples(commit_hash):
     """
     Get all session_samples records filtered by commit_hash.
@@ -141,7 +209,7 @@ def save_battle_results(results: dict, max_possible_profit: int, commit_hash: st
             total_profit = stats["total_profit"]
 
             if max_possible_profit > 0:
-                code_link = get_code_link(commit_hash, model_name)
+                code_link = get_code_link_at_commit(commit_hash, model_name)
                 cursor.execute(
                     """
                     INSERT INTO negotiations (model_name, max_possible_profit, profit, code_link, timestamp)

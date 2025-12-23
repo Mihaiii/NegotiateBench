@@ -5,6 +5,7 @@ psycopg2-binary
 GitPython
 PyYAML
 openai
+markdown
 
 # Development dependencies
 pytest

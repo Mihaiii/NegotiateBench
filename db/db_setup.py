@@ -81,7 +81,8 @@ def setup_database():
                 model_name,
                 (SUM(profit) * 100.0 / SUM(max_possible_profit))::NUMERIC(5,2) AS profit_percentage,
                 SUM(max_possible_profit)::NUMERIC AS max_possible_profit,
-                SUM(profit)::NUMERIC AS total_profit
+                SUM(profit)::NUMERIC AS total_profit,
+                (array_agg(code_link ORDER BY timestamp DESC))[1] AS code_link
             FROM negotiations
             GROUP BY model_name
             ORDER BY profit_percentage DESC;
@@ -98,7 +99,8 @@ def setup_database():
                 model_name,
                 (SUM(profit) * 100.0 / SUM(max_possible_profit))::NUMERIC(5,2) AS profit_percentage,
                 SUM(max_possible_profit)::NUMERIC AS max_possible_profit,
-                SUM(profit)::NUMERIC AS total_profit
+                SUM(profit)::NUMERIC AS total_profit,
+                (array_agg(code_link ORDER BY timestamp DESC))[1] AS code_link
             FROM negotiations
             WHERE timestamp = (SELECT MAX(timestamp) FROM negotiations)
             GROUP BY model_name

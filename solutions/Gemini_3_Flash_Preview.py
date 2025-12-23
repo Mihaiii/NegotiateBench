@@ -7,51 +7,52 @@ class Agent:
         self.total_turns = max_rounds * 2
         self.current_turn = 0
         self.total_value = sum(c * v for c, v in zip(counts, values))
-        # Sort item indices by our valuation descending
+        # Sort items by our valuation descending
         self.indices = sorted(range(len(counts)), key=lambda i: values[i], reverse=True)
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        self.current_turn += 1 if o is None else 2
+        if o is not None:
+            self.current_turn += 1  # Partner's turn
         
         # Calculate utility of the offer received (o is what we get)
         received_val = sum(o[i] * self.values[i] for i in range(len(o))) if o is not None else 0
         
-        # Time pressure factor (0.0 at start, 1.0 at final turn)
+        # normalized progress (0.0 to 1.0)
         progress = self.current_turn / self.total_turns
 
         # 1. Decision to Accept
         if o is not None:
-            # Desperation logic for the absolute final turn
-            is_final_turn = (self.current_turn >= self.total_turns - 1)
-            
-            # Acceptance thresholds based on time
-            if progress < 0.2:
-                threshold = 0.95 * self.total_value
-            elif progress < 0.5:
-                threshold = 0.8 * self.total_value
-            elif progress < 0.8:
-                threshold = 0.7 * self.total_value
-            elif progress < 0.95:
+            # Stricter at start, more lenient as deadline approaches
+            if progress < 0.3:
+                threshold = 0.9 * self.total_value
+            elif progress < 0.6:
+                threshold = 0.75 * self.total_value
+            elif progress < 0.85:
                 threshold = 0.6 * self.total_value
             else:
-                # Accept anything better than nothing if it's the very last chance
-                threshold = 1 if self.total_value > 0 else 0
-
-            if received_val >= threshold:
+                # Last resort: accept if we get something significant, or anything on final turn
+                threshold = 0.4 * self.total_value if self.current_turn < self.total_turns - 1 else 1
+            
+            if received_val >= threshold and received_val > 0:
                 return None
 
         # 2. Counter-offer Logic
-        # We start by demanding most value and slowly concede
+        self.current_turn += 1  # Our turn
+        
+        # Determine target value based on progress
         if progress < 0.2:
             target_ratio = 1.0
-        elif progress < 0.4:
-            target_ratio = 0.9
-        elif progress < 0.7:
-            target_ratio = 0.8
-        elif progress < 0.9:
+        elif progress < 0.5:
+            target_ratio = 0.85
+        elif progress < 0.8:
             target_ratio = 0.7
         else:
-            target_ratio = 0.6
+            target_ratio = 0.55
+
+        # If it's the very last turn and we are second player, or nearly last
+        if self.current_turn >= self.total_turns - 1:
+            # Be ultra-realistic, try to get at least 40% if possible
+            target_ratio = 0.4
 
         return self._build_offer(target_ratio)
 
@@ -60,7 +61,7 @@ class Agent:
         my_offer = [0] * len(self.counts)
         current_val = 0
         
-        # Priority 1: Take items that are valuable to us
+        # Step 1: Greedy selection of items starting from most valuable to us
         for i in self.indices:
             if self.values[i] > 0:
                 for _ in range(self.counts[i]):
@@ -70,22 +71,20 @@ class Agent:
                     else:
                         break
         
-        # Priority 2: Give away all items that are worthless to us (Zero Value)
-        # This signals flexibility to the partner without costing us anything.
-        for i in range(len(self.counts)):
-            if self.values[i] == 0:
-                my_offer[i] = 0
-                
-        # Safety check: ensure we don't return an empty offer if we have value
+        # Step 2: If we are very far from target due to item granularity, 
+        # take at least one high value item if possible.
         if current_val == 0 and self.total_value > 0:
-            for i in self.indices:
-                if self.values[i] > 0:
-                    my_offer[i] = 1
-                    break
+            my_offer[self.indices[0]] = 1
+            current_val = self.values[self.indices[0]]
 
-        # Edge case: If we are still asking for everything and it's getting late,
-        # concede the least valuable item to keep negotiations moving.
-        if sum(my_offer) == sum(self.counts) and self.current_turn > 2:
+        # Step 3: Concede items that are worthless to us (0 value) 
+        # The logic above already left them at 0, which is good.
+        # But we must ensure we don't accidentally take them all and look greedy.
+        # If we are making a request for almost everything, drop the 0-value items.
+        
+        # Final safety check: if we are asking for everything and it's not the first turn,
+        # concede the smallest possible value item to signal negotiation.
+        if sum(my_offer) == sum(self.counts) and self.current_turn > 1:
             for i in reversed(self.indices):
                 if my_offer[i] > 0:
                     my_offer[i] -= 1

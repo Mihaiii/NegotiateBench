@@ -136,7 +136,8 @@ def get():
     latest = get_negotiations_leaderboard_latest()
     overall = get_negotiations_leaderboard_all()
 
-    def build_table(title, rows):
+    def build_table(title, rows, subtitle=None):
+        subtitle_el = Small(f" ({subtitle})", cls="text-muted") if subtitle else ""
         table_rows = [
             Tr(
                 Td(r["rank"]),
@@ -149,7 +150,7 @@ def get():
             for r in rows
         ]
         return Div(
-            H3(title, cls="mt-4"),
+            H3(title, subtitle_el, cls="mt-4 d-flex align-items-center gap-2"),
             Table(
                 Thead(
                     Tr(
@@ -167,8 +168,11 @@ def get():
         )
 
     content = []
-    if latest:
-        content.append(build_table("Latest Session", latest))
+    latest_rows = latest["rows"] if latest else []
+    latest_ts = latest["latest_timestamp"] if latest else None
+    if latest_rows:
+        subtitle = latest_ts.isoformat(sep=" ", timespec="seconds") if latest_ts else None
+        content.append(build_table("Latest Session", latest_rows, subtitle))
     if overall:
         content.append(build_table("All Time", overall))
     if not content:

@@ -10,6 +10,7 @@ class Agent:
         self.max_turns = 2 * max_rounds
         self.my_turn_number = 0
         self.partner_offers = []
+        self.has_advantage = (self.max_turns % 2 == 0 and self.me == 0) or (self.max_turns % 2 == 1 and self.me == 1)
 
     def value(self, o: list[int]) -> float:
         return sum(o[i] * self.values[i] for i in range(self.n_types))
@@ -52,18 +53,23 @@ class Agent:
         if o is not None:
             self.partner_offers.append(o)
         is_last_turn = remaining == 0
-        is_penultimate = (self.me == 0 and remaining == 1) or (self.me == 1 and remaining == 2)
+        is_penultimate = current_turn == self.max_turns - 1
         progress = current_turn / self.max_turns if self.max_turns > 0 else 1.0
         v_partner = self.estimate_v_partner()
+        power = 8 if self.has_advantage else 2
         if is_last_turn:
             min_accept = 0
             partner_threshold = self.total / 2
         elif is_penultimate:
             min_accept = self.total / 2
             max_unit = max((v_partner[i] for i in range(self.n_types) if self.counts[i] > 0), default=0)
-            partner_threshold = max_unit * 0.1 if max_unit > 0 else 0
+            if self.has_advantage:
+                partner_threshold = max_unit * 0.1 if max_unit > 0 else 0
+            else:
+                f = 1 - progress ** power
+                my_share_frac = 0.5 + 0.5 * f
+                partner_threshold = self.total * (1 - my_share_frac)
         else:
-            power = 4
             f = 1 - progress ** power
             my_share_frac = 0.5 + 0.5 * f
             min_accept = self.total * my_share_frac
@@ -83,23 +89,23 @@ class Agent:
             if self.values[i] == 0:
                 m[i] = self.counts[i]
                 current_util += m[i] * v_partner[i]
+        candidates = [i for i in range(self.n_types) if self.values[i] > 0 and v_partner[i] > 0 and m[i] < self.counts[i]]
+        if candidates:
+            candidates.sort(key=lambda i: (-v_partner[i] / self.values[i], self.values[i]))
         remaining_needed = partner_threshold - current_util
-        if remaining_needed > 0:
-            candidates = [i for i in range(self.n_types) if self.values[i] > 0 and v_partner[i] > 0 and m[i] < self.counts[i]]
-            if candidates:
-                candidates.sort(key=lambda i: (-v_partner[i] / self.values[i], self.values[i]))
-                for i in candidates:
-                    util_per = v_partner[i]
-                    max_give = self.counts[i] - m[i]
-                    if remaining_needed <= 0:
-                        break
-                    num_needed = math.ceil(remaining_needed / util_per)
-                    num = min(num_needed, max_give)
-                    m[i] += num
-                    added = num * util_per
-                    current_util += added
-                    remaining_needed -= added
-        if is_penultimate and current_util == 0 and candidates:
+        if remaining_needed > 0 and candidates:
+            for i in candidates:
+                util_per = v_partner[i]
+                max_give = self.counts[i] - m[i]
+                if remaining_needed <= 0:
+                    break
+                num_needed = math.ceil(remaining_needed / util_per)
+                num = min(num_needed, max_give)
+                m[i] += num
+                added = num * util_per
+                current_util += added
+                remaining_needed -= added
+        if current_util == 0 and candidates and not is_last_turn:
             i = candidates[0]
             m[i] += 1
         my_offer = [self.counts[i] - m[i] for i in range(self.n_types)]

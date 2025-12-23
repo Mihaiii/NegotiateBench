@@ -3,83 +3,73 @@ class Agent:
         self.me = me
         self.counts = counts
         self.values = values
-        self.total_rounds = max_rounds
+        self.max_rounds = max_rounds
         self.rounds_left = max_rounds
         self.total_value = sum(counts[i] * values[i] for i in range(len(counts)))
         self.sorted_indices = sorted(range(len(counts)), key=lambda i: -values[i])
+        self.best_offer_value = 0
+        self.best_offer = None
         self.offers_received = []
         
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.rounds_left -= 1
         
-        # First turn: make initial strategic demand
+        # First turn: make strategic opening
         if o is None:
-            # Strategic opening: demand all high-value items but leave partner something
-            target = self.total_value * 0.55  # Reasonable opening demand
-            return self._build_demand(target)
+            return self._build_counter_offer(self.total_value * 0.52)
         
-        # Analyze partner's offer
+        # Track best offer received
         offered_value = sum(o[i] * self.values[i] for i in range(len(o)))
+        if offered_value > self.best_offer_value:
+            self.best_offer_value = offered_value
+            self.best_offer = o
         self.offers_received.append(o)
         
-        # Calculate fair share threshold - becomes more flexible as time passes
-        fair_share = self.total_value * 0.5
-        pressure_factor = 1.0 - (self.rounds_left / self.total_rounds) * 0.3
-        min_acceptable = fair_share * pressure_factor
-        
         # Accept if offer meets minimum threshold
+        min_acceptable = self._get_min_acceptable()
         if offered_value >= min_acceptable:
             return None
             
-        # Last chance: accept any positive offer to avoid getting nothing
+        # Last round: accept any positive offer
         if self.rounds_left == 0:
             return None
             
-        # Build counter-offer using strategic calculation
-        # Partner's revealed value gives us insight into what they might accept
-        partner_revealed_value = self._estimate_partner_value(o)
+        # Calculate target value for counter-offer
+        # Concede more as rounds progress, but stay above minimum
+        progress = 1 - (self.rounds_left / self.max_rounds)
+        target = self.total_value * (0.5 + 0.05 * (1 - progress))
+        target = max(target, min_acceptable + 1)
         
-        # Calculate strategic counter - leave partner enough to make deal attractive
-        # but maximize our share
-        my_share_target = max(min_acceptable + 1, self.total_value * 0.52)
+        # Adapt based on partner's behavior
+        if len(self.offers_received) >= 2:
+            partner_concession = self._analyze_partner_concession()
+            if partner_concession > 0:
+                # Partner is conceding, match their pace
+                target = min(target + partner_concession * self.total_value * 0.02, 
+                           self.total_value * 0.48)
         
-        # Make smaller concessions as rounds progress
-        concession = (self.rounds_left / self.total_rounds) * 0.1
-        counter_target = self.total_value * (0.5 + concession)
-        
-        counter = self._build_counter_offer(counter_target)
-        
-        # Verify counter is valid (sums to available items)
-        if sum(counter) > sum(self.counts):
-            counter = self._build_counter_offer(counter_target * 0.9)
-            
-        return counter
+        return self._build_counter_offer(target)
     
-    def _estimate_partner_value(self, offer: list[int]) -> float:
-        """Estimate partner's total valuation based on their offer patterns."""
-        if not offer:
-            return self.total_value
-            
-        # Partner is offering us 'offer', so they keep the rest
-        # Their share is: total_value - value_of_offer_to_us
-        offer_value_to_me = sum(offer[i] * self.values[i] for i in range(len(offer)))
-        
-        # But we don't know their values, so estimate conservatively
-        # If they offer us low-value items, they probably value those items less
-        min_possible_value = 0
-        
-        # Assume partner values items at least something if they're offering them
-        for i in range(len(offer)):
-            if offer[i] < self.counts[i] and offer[i] > 0:
-                # They're keeping some, so they value it at least something
-                if self.values[i] > 0:
-                    min_possible_value += (self.counts[i] - offer[i]) * 1
-        
-        return max(min_possible_value, self.total_value * 0.3)
+    def _get_min_acceptable(self) -> float:
+        """Calculate minimum acceptable value based on remaining time."""
+        progress = 1 - (self.rounds_left / self.max_rounds)
+        # Minimum starts at 50% and gradually decreases to 40% by end
+        return self.total_value * (0.5 - 0.1 * progress)
     
-    def _build_demand(self, target_value: float) -> list[int]:
-        """Build initial demand focusing on high-value items."""
-        return self._build_counter_offer(target_value)
+    def _analyze_partner_concession(self) -> float:
+        """Analyze how much partner has conceded from their opening."""
+        if len(self.offers_received) < 2:
+            return 0
+            
+        first_offer = self.offers_received[0]
+        last_offer = self.offers_received[-1]
+        
+        first_value = sum(first_offer[i] * self.values[i] for i in range(len(first_offer)))
+        last_value = sum(last_offer[i] * self.values[i] for i in range(len(last_offer)))
+        
+        if first_value > last_value:
+            return (first_value - last_value) / self.total_value
+        return 0
     
     def _build_counter_offer(self, target_value: float) -> list[int]:
         """Build counter-offer targeting specific value."""
@@ -87,18 +77,15 @@ class Agent:
         remaining = self.counts[:]
         current_value = 0
         
-        # First pass: take all high-value items we strongly prefer
+        # First pass: take highest-value items
         for i in self.sorted_indices:
             if remaining[i] > 0 and self.values[i] > 0:
-                item_value = self.values[i]
-                # Take all if it's one of our top priorities
-                if item_value >= max(self.values) * 0.8:
-                    take = min(remaining[i], 1)  # Take at most 1 of top items
-                    counter[i] = take
-                    remaining[i] -= take
-                    current_value += take * item_value
+                take = min(remaining[i], 1)
+                counter[i] = take
+                remaining[i] -= take
+                current_value += take * self.values[i]
         
-        # Second pass: strategically fill to reach target
+        # Second pass: strategically add items to reach target
         for i in self.sorted_indices:
             if remaining[i] > 0 and current_value < target_value:
                 item_value = self.values[i]
@@ -110,11 +97,10 @@ class Agent:
                         remaining[i] -= take
                         current_value += take * item_value
         
-        # Third pass: add more items if we have room and partner would likely accept
+        # Add one more item to make deal attractive if we have room
         for i in self.sorted_indices:
             if remaining[i] > 0:
                 counter[i] += 1
-                remaining[i] -= 1
-                break  # Just add one more item to make deal more attractive
+                break
         
         return counter

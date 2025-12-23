@@ -8,7 +8,7 @@ class Agent:
         self.current_turn = 0
         self.total_value = sum(c * v for c, v in zip(counts, values))
         
-        # Sort indices by value density (highest value first)
+        # Priority for items based on my own valuation
         self.pref_indices = sorted(
             range(len(counts)),
             key=lambda i: self.values[i],
@@ -17,79 +17,67 @@ class Agent:
 
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.current_turn += 1
-        
-        # How many turns are left after THIS turn
         turns_remaining = self.total_turns - self.current_turn
         
         # 1. EVALUATE PARTNER'S OFFER
         if o is not None:
             offer_val = sum(o[i] * self.values[i] for i in range(len(o)))
             
-            # Acceptance Logic:
-            # If it's the absolute last turn, accept any value > 0
+            # Acceptance Thresholds
+            # If it's the very last turn of the game, accept anything > 0 (better than nothing)
             if turns_remaining == 0:
                 if offer_val > 0 or self.total_value == 0:
                     return None
             
-            # Dynamic Threshold: Be stubborn early, flexible late
-            # progress is 0.0 at start, 1.0 at end
+            # Dynamic strategy: Be demanding early, more compromising late.
+            # Progress through turns (0.0 to 1.0)
             progress = self.current_turn / self.total_turns
             
-            if progress < 0.2:
-                threshold = 0.95 * self.total_value
-            elif progress < 0.5:
-                threshold = 0.85 * self.total_value
-            elif progress < 0.8:
-                threshold = 0.70 * self.total_value
+            # Minimum value we are willing to accept
+            if progress < 0.3:
+                threshold = 0.9 * self.total_value
+            elif progress < 0.7:
+                threshold = 0.7 * self.total_value
+            elif progress < 0.9:
+                threshold = 0.6 * self.total_value
             else:
-                # In the final stretch, aim for a bit more than half
-                threshold = 0.55 * self.total_value
+                threshold = 0.5 * self.total_value
 
             if offer_val >= threshold and offer_val > 0:
                 return None
 
         # 2. CONSTRUCT COUNTER-OFFER
-        # Start high, lower target value as the clock ticks
-        # We start at 100% and drop towards 60%
-        target_ratio = 1.0 - (0.4 * (self.current_turn / self.total_turns))
-        target_val = max(target_ratio * self.total_value, 1)
+        # Start by asking for everything, slowly lowering expectations.
+        # target_ratio goes from 1.0 down to ~0.65
+        target_ratio = 1.0 - (0.35 * (self.current_turn / self.total_turns))
+        target_val = max(target_ratio * self.total_value, self.total_value * 0.5)
         
         my_offer = [0] * len(self.counts)
-        current_offer_val = 0
+        current_val = 0
         
-        # Strategy: Take items valuable to me first.
-        # Leave items worth 0 to me for the partner (they might value them).
+        # Fill offer with most valuable items first
         for i in self.pref_indices:
-            if self.values[i] == 0:
-                continue
-            
-            for _ in range(self.counts[i]):
-                if current_offer_val < target_val:
-                    my_offer[i] += 1
-                    current_offer_val += self.values[i]
-                else:
+            if self.values[i] > 0:
+                for _ in range(self.counts[i]):
+                    if current_val < target_val:
+                        my_offer[i] += 1
+                        current_val += self.values[i]
+                    else:
+                        break
+        
+        # 3. STRATEGIC CONCESSION (The "Sweetener")
+        # Ensure the partner sees they get something, especially on our final word.
+        # If we are asking for every single item, and there's more than one item, 
+        # leave them the one that is worth the LEAST to us.
+        if sum(my_offer) == sum(self.counts) and sum(self.counts) > 1:
+            for i in reversed(self.pref_indices):
+                if my_offer[i] > 0:
+                    my_offer[i] -= 1
+                    current_val -= self.values[i]
                     break
 
-        # 3. STRATEGIC CONCESSION
-        # If we are in the last moments of negotiation, 
-        # make sure the partner feels they are getting something.
-        # This increases the chance they click "Accept" on our last offer.
-        if turns_remaining <= 1:
-            # Ensure we aren't asking for everything unless we have to
-            # If our offer still captures all the value, drop one small item
-            total_items_in_offer = sum(my_offer)
-            total_items_available = sum(self.counts)
-            
-            if total_items_in_offer == total_items_available and total_items_available > 1:
-                # Give away the item in our offer that is worth the LEAST to us
-                for i in reversed(self.pref_indices):
-                    if my_offer[i] > 0:
-                        my_offer[i] -= 1
-                        current_offer_val -= self.values[i]
-                        break
-
-        # Safety: If current_offer_val is 0 due to values being 0, take at least one thing
-        if current_offer_val == 0 and sum(self.counts) > 0:
-             my_offer[self.pref_indices[0]] = self.counts[self.pref_indices[0]]
-                    
+        # Fallback: if we haven't selected anything (e.g., all values are 0), take something.
+        if sum(my_offer) == 0:
+            my_offer[self.pref_indices[0]] = self.counts[self.pref_indices[0]]
+                
         return my_offer

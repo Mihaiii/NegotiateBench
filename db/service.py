@@ -204,7 +204,7 @@ def get_samples(commit_hash):
     return results
 
 
-def save_battle_results(results: dict, max_possible_profit: int, commit_hash: str):
+def save_battle_results(results: dict, max_possible_profit: int, commit_hash: str, top_model_name: str):
     """
     Save battle results to the negotiations table.
 
@@ -228,7 +228,10 @@ def save_battle_results(results: dict, max_possible_profit: int, commit_hash: st
             total_profit = stats["total_profit"]
 
             if max_possible_profit > 0:
-                code_link = get_code_link_at_commit(commit_hash, model_name)
+                if model_name == top_model_name:
+                    code_link = "No new solution was generated for the previous top model."
+                else:
+                    code_link = get_code_link_at_commit(commit_hash, model_name)
                 cursor.execute(
                     """
                     INSERT INTO negotiations (model_name, max_possible_profit, profit, code_link, timestamp)

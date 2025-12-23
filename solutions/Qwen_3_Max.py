@@ -5,71 +5,92 @@ class Agent:
         self.values = values
         self.max_rounds = max_rounds
         self.total_value = sum(c * v for c, v in zip(counts, values))
-        self.round_num = 0
+        self.turn_count = 0
         
     def offer(self, o: list[int] | None) -> list[int] | None:
-        self.round_num += 1
+        self.turn_count += 1
         
-        # If this is a counter-offer (not the first move), evaluate the offer
+        # If responding to an offer
         if o is not None:
-            # Calculate value of the offer to us
             offer_value = sum(o_i * v_i for o_i, v_i in zip(o, self.values))
-            
-            # If the offer gives us at least our minimum acceptable value, accept it
             min_acceptable = self._min_acceptable_value()
             if offer_value >= min_acceptable:
                 return None
         
-        # Generate our counter-offer
+        # Generate counter-offer
         return self._generate_offer()
     
     def _min_acceptable_value(self) -> int:
-        # Calculate how many rounds remain (including current)
-        rounds_remaining = self.max_rounds - (self.round_num - 1) // 2
+        # Calculate how many full rounds remain after current turn
+        turns_remaining = (self.max_rounds * 2) - self.turn_count
+        rounds_remaining = (turns_remaining + 1) // 2
         
-        # If we're in the last possible round and it's our turn to respond,
-        # we should accept anything better than 0
-        if rounds_remaining <= 1 and self.round_num % 2 == (1 if self.me == 0 else 0):
+        # In the final round, accept anything > 0 if we're responding
+        if rounds_remaining == 0:
             return 1
         
-        # Be more flexible as rounds run out
-        if rounds_remaining <= 2:
+        # Be more flexible as time runs out
+        if rounds_remaining == 1:
+            return max(1, self.total_value // 4)
+        elif rounds_remaining <= 3:
             return max(1, self.total_value // 3)
-        elif rounds_remaining <= 4:
+        elif rounds_remaining <= 6:
             return max(1, self.total_value // 2)
         else:
             return max(1, (2 * self.total_value) // 3)
     
     def _generate_offer(self) -> list[int]:
-        # Create a list of (value_per_item, item_index) for items we value
-        item_values = []
-        for i, (count, value) in enumerate(zip(self.counts, self.values)):
-            if value > 0 and count > 0:
-                item_values.append((value, i))
+        # Calculate our target value for this offer
+        min_acceptable = self._min_acceptable_value()
+        # Be slightly more aggressive than minimum acceptable
+        target_value = min(self.total_value, min_acceptable + max(1, (self.total_value - min_acceptable) // 3))
         
-        # Sort by value descending (we want high-value items first)
-        item_values.sort(reverse=True)
+        # Create list of items sorted by our value (descending)
+        items = []
+        for i in range(len(self.counts)):
+            if self.values[i] > 0:
+                items.append((self.values[i], i))
+        items.sort(reverse=True)
         
         # Start with taking nothing
         offer = [0] * len(self.counts)
-        
-        # Calculate target value based on remaining rounds
-        min_acceptable = self._min_acceptable_value()
-        target_value = min(self.total_value, min_acceptable + (self.total_value - min_acceptable) // 2)
-        
         current_value = 0
         
-        # Greedily take items starting with highest value
-        for value, idx in item_values:
+        # Greedily add highest value items first
+        for value, idx in items:
             if current_value >= target_value:
                 break
-            # Take as many as needed of this item to reach target
-            needed_value = target_value - current_value
-            max_items = min(self.counts[idx], (needed_value + value - 1) // value)
-            offer[idx] = max_items
-            current_value += max_items * value
+            # Calculate how many of this item we need
+            remaining_value_needed = target_value - current_value
+            max_possible_items = self.counts[idx]
+            items_to_take = min(max_possible_items, (remaining_value_needed + value - 1) // value)
+            offer[idx] = items_to_take
+            current_value += items_to_take * value
         
-        # Ensure we don't exceed counts
+        # If we're making the first move, be more reasonable
+        if self.turn_count == 1 and self.me == 0:
+            # Reduce our demand slightly to make it more acceptable
+            reduction_needed = max(1, target_value // 10)
+            current_value = sum(offer[i] * self.values[i] for i in range(len(offer)))
+            if current_value > self.total_value // 2:
+                # Remove lowest value items first to reduce demand
+                low_value_items = []
+                for i in range(len(self.counts)):
+                    if offer[i] > 0 and self.values[i] > 0:
+                        low_value_items.append((self.values[i], i))
+                low_value_items.sort()  # ascending by value
+                
+                value_to_remove = 0
+                for value, idx in low_value_items:
+                    while offer[idx] > 0 and value_to_remove < reduction_needed:
+                        offer[idx] -= 1
+                        value_to_remove += value
+                        if value_to_remove >= reduction_needed:
+                            break
+                    if value_to_remove >= reduction_needed:
+                        break
+        
+        # Ensure we don't exceed available counts
         for i in range(len(offer)):
             offer[i] = min(offer[i], self.counts[i])
             

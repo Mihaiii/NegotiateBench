@@ -1,116 +1,78 @@
-import itertools
-
 class Agent:
     def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
         self.me = me
         self.counts = counts
         self.values = values
-        self.max_rounds = max_rounds
-        self.rounds_left = max_rounds
+        self.total_turns = max_rounds * 2
         
-        # Calculate total potential value (upper bound)
-        self.total_value = sum(c * v for c, v in zip(counts, values))
+        # Track current turn index (0-indexed). 
+        # me=0 (First player) plays turns 0, 2, ...
+        # me=1 (Second player) plays turns 1, 3, ...
+        self.current_turn = me
         
-        # Pre-generate all possible deals (partitions) from 'my' perspective.
-        # A deal is defined by the count of items I receive.
-        # We store: (my_value, opponent_item_count, partition_list)
-        self.possible_deals = []
+        # Calculate total potential value for myself
+        self.val_max = sum(c * v for c, v in zip(counts, values))
         
-        # Creating ranges for itertools product (0 to count for each item type)
-        ranges = [range(c + 1) for c in counts]
-        
-        for partition in itertools.product(*ranges):
-            partition = list(partition)
-            
-            # Calculate my utility for this partition
-            my_val = sum(p * v for p, v in zip(partition, values))
-            
-            # Calculate the number of items the opponent gets (Generosity Heuristic)
-            # We assume opponents prefer getting more physical items if values are unknown.
-            opp_items_count = sum((counts[i] - partition[i]) for i in range(len(counts)))
-            
-            self.possible_deals.append({
-                "partition": partition,
-                "value": my_val,
-                "opp_items": opp_items_count
-            })
-            
-        # Sort deals primarily by My Value (Descending), 
-        # and secondarily by Opponent Item Count (Descending).
-        # This helps us pick the "nicest" high-value offer later.
-        self.possible_deals.sort(key=lambda x: (x["value"], x["opp_items"]), reverse=True)
+        # Create a flattened list of items as (value, type_index) tuples
+        # and sort them by value descending. This helps in greedy selection.
+        self.items = []
+        for i, val in enumerate(values):
+            if val > 0:
+                self.items.extend([(val, i)] * counts[i])
+        self.items.sort(key=lambda x: x[0], reverse=True)
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        # Determine current 'time' in the negotiation (0.0 start -> 1.0 end)
-        # We use rounds_left to estimate urgency.
-        progress = (self.max_rounds - self.rounds_left) / float(self.max_rounds)
-
-        # 1. Analyze Incoming Offer
-        offer_value = -1
-        if o is not None:
-            offer_value = sum(o[i] * self.values[i] for i in range(len(o)))
+        if o:
+            # Calculate the value of the offer to me
+            val_offered = sum(o[i] * self.values[i] for i in range(len(self.counts)))
             
-            # END-GAME LOGIC (Second Player)
-            # If I am Player 1 and this is the last round (Turn 2*max_rounds),
-            # rejecting means we both get 0. I must accept anything > 0.
-            if self.me == 1 and self.rounds_left == 1:
-                if offer_value > 0 or self.total_value == 0:
+            # Special Endgame Logic for Player 2 (Second Mover)
+            # If this is the absolute last turn of the game, rejecting implies 0 payoff.
+            # Therefore, rationally accept any offer that gives positive value.
+            if self.me == 1 and self.current_turn >= self.total_turns - 1:
+                if val_offered > 0:
                     return None
-
-        # 2. Calculate Dynamic Threshold (Boulware Strategy)
-        # We want to start high and concede slowly, dropping to a reservation price at the end.
-        
-        # Reservation price: roughly 60% of total value (aim for slightly better than even).
-        min_frac = 0.6
-        
-        # END-GAME LOGIC (First Player)
-        # If I am Player 0 and this is the last round, this is my LAST offer.
-        # I must offer something the opponent is very likely to accept (~50-55%).
-        if self.me == 0 and self.rounds_left == 1:
-            min_frac = 0.55
             
-        # Curve: Total * (1 - (1-min) * progress^3)
-        # The power of 3 keeps the required value high for the first ~70% of the game.
-        current_threshold = self.total_value * (1.0 - (1.0 - min_frac) * (progress ** 3))
-        
-        # 3. Decision: Accept?
-        if o is not None:
-            # If the offer is good enough, take it.
-            if offer_value >= current_threshold:
-                self.rounds_left -= 1
+            # Standard Acceptance Logic
+            # Accept if the offer meets our current target aspirational value
+            if val_offered >= self._get_target():
                 return None
 
-        # 4. Decision: Counter-Offer
-        # We look for the best deal for ME that is just above my concession threshold.
-        # Using a deal closer to the threshold increases the chance the opponent accepts
-        # (because it likely gives them more value than my greedy top offers).
+        # If not accepted, generate a counter-offer
+        target = self._get_target()
+        my_offer = [0] * len(self.counts)
+        current_sum = 0
         
-        # Filter deals that pass the threshold
-        candidates = [d for d in self.possible_deals if d["value"] >= current_threshold]
+        # Greedy Strategy: Fill my basket with my most valuable items until target is met.
+        # This implicitly gives the partner the items I value least (which they might value high).
+        for val, idx in self.items:
+            if current_sum < target:
+                my_offer[idx] += 1
+                current_sum += val
+            else:
+                break
         
-        if not candidates:
-            # Fallback (shouldn't happen unless threshold > total): Demand everything
-            best_offer = self.possible_deals[0]["partition"]
-        else:
-            # 'candidates' is sorted by Value Descending.
-            # The deals at the END of 'candidates' are the ones closest to the threshold.
-            # Strategy: Pick the deal with the LOWEST value that satisfies the threshold
-            # to maximize opponent appeal (Conceder behavior at the offer level).
-            
-            # Find the value of the last candidate (closest to threshold)
-            target_val = candidates[-1]["value"]
-            
-            # Get all deals with this specific value
-            # (There might be multiple ways to get the same score)
-            ties = [d for d in candidates if d["value"] == target_val]
-            
-            # Among ties, pick the one that gives the MOST items to the opponent.
-            # Our sort order (Opp Items Desc) ensures the first one in 'ties' logic needs care.
-            # Actually, the main sort was (Value DESC, OppItems DESC).
-            # So within a value bracket, the one with MOST opp items is FIRST.
-            best_offer = ties[0]["partition"]
+        # Increment turn counter for the next time this method is called
+        self.current_turn += 2
+        return my_offer
 
-        # Decrement counter for next call
-        self.rounds_left -= 1
+    def _get_target(self):
+        # Calculate 'progress' of negotiations (0.0 to 1.0)
+        # Using max(1, ...) to prevent division by zero in edge cases
+        progress = self.current_turn / max(1, self.total_turns - 1)
         
-        return best_offer
+        # Concession Curve
+        if progress < 0.5:
+            # First half: Hold firm at 100% (High Aspiration)
+            factor = 1.0
+        elif progress < 0.8:
+            # 50% - 80%: Linear concession from 100% to 85%
+            # Normalized progress x in [0, 1]
+            x = (progress - 0.5) / 0.3
+            factor = 1.0 - (0.15 * x)
+        else:
+            # Last 20%: Rapid concession from 85% to 50% (Fair Split)
+            x = (progress - 0.8) / 0.2
+            factor = 0.85 - (0.35 * x)
+            
+        return int(self.val_max * factor)

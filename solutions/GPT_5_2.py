@@ -1,242 +1,400 @@
 import math
+import random
 from typing import List, Optional
 
 
 class Agent:
     """
-    Heuristic bargaining agent under unknown opponent valuations with known equal total value.
+    Negotiation agent for the Haggling challenge.
 
-    Core ideas:
-    - Estimate opponent "preferences" from what they keep in their offers.
-    - Convert preference weights into a pseudo valuation vector scaled to match our known total.
-    - Make offers by keeping at least a target value for ourselves while giving away items
-      that (a) cost us little and (b) seem to matter to them.
-    - Accept offers above a time-dependent threshold.
+    Key features:
+    - Learns opponent preferences from what they keep/give in their offers.
+    - Maintains a soft interval estimate of opponent acceptance threshold (as fraction of total).
+    - Chooses counter-offers by maximizing expected utility (my_value * P(accept)),
+      using either exact enumeration (when the space is small) or a heuristic candidate search.
     """
+
+    # ------------------------------- Init -------------------------------
 
     def __init__(self, me: int, counts: List[int], values: List[int], max_rounds: int):
         self.me = int(me)
-        self.counts = list(counts)
-        self.values = list(values)
+        self.counts = list(map(int, counts))
+        self.values = list(map(int, values))
         self.max_rounds = int(max_rounds)
 
         self.n = len(self.counts)
         self.total = sum(c * v for c, v in zip(self.counts, self.values))
+        self.turn = 0  # 0..max_rounds-1 (our turns only)
 
-        # Called once per our turn; starts at 0.
-        self.turn_idx = 0
-
-        # Best value we have been offered so far (from our perspective).
         self.best_received = 0
 
-        # Opponent preference weights (higher => they likely value it more).
-        # Start slightly >0 to avoid zeros.
-        self.opp_pref = [1.0] * self.n
+        # Opponent preference signals: what they keep vs what they give us (from their offers).
+        self.kept_sum = [0.0] * self.n
+        self.given_sum = [0.0] * self.n
 
-        # Precompute for speed.
-        self._all_zero_offer = [0] * self.n
+        # Opponent acceptance threshold bounds as fractions of total value (0..1).
+        # lb: they likely need at least this; ub: they likely accept at most this (soft).
+        self.opp_lb_f = 0.0
+        self.opp_ub_f = 1.0
 
-    # ------------------------- Utility helpers -------------------------
+        # Track our last offer's estimated opponent fraction (for "they rejected it" update).
+        self._last_sent_offer: Optional[List[int]] = None
+        self._last_sent_opp_frac: Optional[float] = None
+
+        # Precompute for enumeration pruning.
+        self._suffix_my_max = [0] * (self.n + 1)
+        for i in range(self.n - 1, -1, -1):
+            self._suffix_my_max[i] = self._suffix_my_max[i + 1] + self.counts[i] * self.values[i]
+
+        # Deterministic-ish RNG (no persistence across sessions).
+        seed = (sum(self.counts) + 31 * sum(self.values) + 131 * self.max_rounds + 7 * self.me) & 0xFFFFFFFF
+        self._rng = random.Random(seed)
+
+    # ------------------------------ Utils ------------------------------
 
     def _my_value(self, offer_to_me: List[int]) -> int:
         return sum(v * x for v, x in zip(self.values, offer_to_me))
 
     def _progress(self) -> float:
-        # 0.0 at our first move, 1.0 at our last move
         if self.max_rounds <= 1:
             return 1.0
-        return min(1.0, max(0.0, self.turn_idx / (self.max_rounds - 1)))
+        return min(1.0, max(0.0, self.turn / (self.max_rounds - 1)))
 
     @staticmethod
     def _sigmoid(x: float) -> float:
-        # Numerically safe logistic
-        if x < -20:
+        # Safe logistic
+        if x <= -30.0:
             return 0.0
-        if x > 20:
+        if x >= 30.0:
             return 1.0
         return 1.0 / (1.0 + math.exp(-x))
 
-    def _update_opp_pref(self, o: List[int]) -> None:
-        # Opponent keeps (counts - o). Accumulate what they keep over time.
+    def _valid_offer(self, o: List[int]) -> bool:
+        return (
+            isinstance(o, list)
+            and len(o) == self.n
+            and all(isinstance(x, int) for x in o)
+            and all(0 <= o[i] <= self.counts[i] for i in range(self.n))
+        )
+
+    # --------------- Opponent modeling (from their offers) --------------
+
+    def _update_from_their_offer(self, o: List[int]) -> None:
         for i in range(self.n):
+            given = o[i]
             kept = self.counts[i] - o[i]
+            if given > 0:
+                self.given_sum[i] += given
             if kept > 0:
-                self.opp_pref[i] += kept
+                self.kept_sum[i] += kept
 
     def _opp_unit_values_scaled(self) -> List[float]:
-        # Scale weights so that sum(counts[i] * opp_unit[i]) == our total.
-        # If our total == 0, any scale works; return zeros.
+        """
+        Build opponent pseudo unit-values from (kept/given) ratios, then scale so that
+        sum(counts[i]*opp_unit[i]) == our total (given in problem statement).
+        """
         if self.total <= 0:
             return [0.0] * self.n
-        denom = sum(self.counts[i] * self.opp_pref[i] for i in range(self.n))
+
+        # Preference weight: high if they keep it a lot and give it rarely.
+        weights = []
+        for i in range(self.n):
+            w = (self.kept_sum[i] + 1.0) / (self.given_sum[i] + 1.0)
+            # Slightly downweight types with zero availability noise (still fine).
+            weights.append(max(1e-6, w))
+
+        denom = sum(self.counts[i] * weights[i] for i in range(self.n))
         if denom <= 0:
             return [0.0] * self.n
         scale = self.total / denom
-        return [w * scale for w in self.opp_pref]
+        return [w * scale for w in weights]
 
-    def _opp_est_value(self, offer_to_me: List[int], opp_unit: List[float]) -> float:
-        # Estimated opponent value of their share.
+    def _opp_value_of_their_share(self, offer_to_me: List[int], opp_unit: List[float]) -> float:
+        # Opponent gets (counts - offer_to_me)
         return sum((self.counts[i] - offer_to_me[i]) * opp_unit[i] for i in range(self.n))
 
-    # ------------------------- Offer construction -------------------------
+    def _opp_frac_of_total(self, offer_to_me: List[int], opp_unit: List[float]) -> float:
+        if self.total <= 0:
+            return 0.0
+        return self._opp_value_of_their_share(offer_to_me, opp_unit) / float(self.total)
 
-    def _build_offer_greedy(self, target_my_value: float, opp_unit: List[float]) -> List[int]:
+    def _update_opp_threshold_bounds(self, their_offer: Optional[List[int]], opp_unit: List[float]) -> None:
         """
-        Start from taking everything, then concede units that maximize opponent gain per our loss,
-        while keeping my_value >= target_my_value. Always give away our zero-value items.
+        Update opponent threshold bounds:
+        - If they rejected our last offer (i.e., we now see a new offer from them),
+          then their required value is likely > opp_frac(last_offer).
+        - If they make an offer, their own demanded share is an upper bound-ish
+          (threshold is <= what they demand), with slack.
         """
-        offer = self.counts[:]  # we take all
-        my_val = self.total
+        # Rejection update (soft lower bound)
+        if their_offer is not None and self._last_sent_opp_frac is not None:
+            # Add a small margin because rejection implies "not enough for them"
+            self.opp_lb_f = max(self.opp_lb_f, min(1.0, self._last_sent_opp_frac + 0.02))
 
-        # Give away all items we don't value.
-        for i in range(self.n):
-            if self.values[i] == 0 and offer[i] > 0:
-                offer[i] = 0
+        # Their offer update (soft upper bound with slack; they can demand > minimum)
+        if their_offer is not None:
+            frac = self._opp_frac_of_total(their_offer, opp_unit)
+            self.opp_ub_f = min(self.opp_ub_f, min(1.0, frac + 0.10))
 
-        # Recompute after zero-value giveaways.
-        my_val = self._my_value(offer)
-        if my_val <= target_my_value or self.total <= 0:
-            return offer
+        # Keep interval sane
+        if self.opp_lb_f > self.opp_ub_f:
+            mid = 0.5 * (self.opp_lb_f + self.opp_ub_f)
+            self.opp_lb_f = max(0.0, mid - 0.05)
+            self.opp_ub_f = min(1.0, mid + 0.05)
 
-        # Sort item-types by "opponent value per our cost" (descending).
-        items = []
-        for i in range(self.n):
-            if offer[i] > 0 and self.values[i] > 0:
-                ratio = opp_unit[i] / self.values[i]  # higher => better to give
-                items.append((ratio, i))
-        items.sort(reverse=True)
+    # ------------------------ Our accept policy ------------------------
 
-        # Concede as much as possible from best ratios while staying above target.
-        for _, i in items:
-            if my_val <= target_my_value:
-                break
-            v = self.values[i]
-            if v <= 0 or offer[i] <= 0:
-                continue
-            # max units we can give without dropping below target
-            slack = my_val - target_my_value
-            give = int(min(offer[i], slack // v))
-            if give > 0:
-                offer[i] -= give
-                my_val -= give * v
-
-        return offer
-
-    # ------------------------- Decision logic -------------------------
-
-    def _accept_threshold(self) -> float:
+    def _accept_threshold_value(self) -> float:
         """
-        Time-dependent acceptance threshold (fraction of total).
-        Starts firm and concedes over time.
+        Our minimum acceptable value (in our utility units) at current turn.
         """
         if self.total <= 0:
             return 0.0
 
         p = self._progress()
+        # Firm early, concede over time: ~0.88 -> ~0.38
+        frac = 0.88 - 0.50 * p
 
-        # Base schedule: 0.75 -> 0.25
-        frac = 0.75 - 0.50 * p
+        # Last move adjustments: if we are second, rejecting ends negotiations.
+        if self.turn >= self.max_rounds - 1:
+            if self.me == 1:
+                frac = min(frac, 0.25)
+            else:
+                frac = min(frac, 0.32)
 
-        # If we are second, our last move is final; keep some minimum, but not too high.
-        if self.me == 1 and self.turn_idx >= self.max_rounds - 1:
-            frac = min(frac, 0.30)  # last chance to accept; be pragmatic
+        # Don't drop far below best seen unless very late.
+        guard = self.best_received - (0.03 + 0.05 * p) * self.total
+        floor = max(frac * self.total, guard)
 
-        # If we are first, our last move is an offer (opponent still responds),
-        # so acceptance can remain a touch firmer.
-        if self.me == 0 and self.turn_idx >= self.max_rounds - 1:
-            frac = max(frac, 0.35)
+        # Never accept a truly tiny fraction unless total is zero anyway.
+        floor = max(floor, 0.12 * self.total)
+        return min(self.total, max(0.0, floor))
 
-        # Don't accept far below our best seen unless very late.
-        best_guard = self.best_received - 0.05 * self.total
-        return max(frac * self.total, best_guard)
+    # ------------------------ Offer optimization ------------------------
+
+    def _opp_accept_params(self) -> tuple[float, float]:
+        """
+        Returns (theta_f, k_f) for acceptance probability model:
+            P(accept) = sigmoid((opp_frac - theta_f) / k_f)
+        """
+        p = self._progress()
+        # Prior schedule for opponent threshold fraction (decreasing over time).
+        base = 0.60 - 0.30 * p  # 0.60 -> 0.30
+        theta_f = min(max(base, self.opp_lb_f), self.opp_ub_f)
+
+        spread = max(0.0, self.opp_ub_f - self.opp_lb_f)
+        k_f = max(0.05, 0.5 * spread + 0.06)  # softness
+        return theta_f, k_f
+
+    def _score_offer(self, offer: List[int], opp_unit: List[float], floor_value: float) -> float:
+        myv = self._my_value(offer)
+        if myv + 1e-9 < floor_value:
+            return -1e30  # hard floor
+
+        opp_frac = self._opp_frac_of_total(offer, opp_unit)
+        theta_f, k_f = self._opp_accept_params()
+        prob = self._sigmoid((opp_frac - theta_f) / k_f)
+
+        # Primary objective: maximize expected utility; small tie-break toward their acceptance.
+        return myv * prob + 0.02 * (opp_frac * self.total)
+
+    def _search_by_enumeration(self, opp_unit: List[float], floor_value: float) -> List[int]:
+        best_offer = [0] * self.n
+        best_score = -1e30
+
+        offer = [0] * self.n
+
+        def rec(i: int, myv: int) -> None:
+            nonlocal best_score, best_offer
+
+            # Prune: even taking all remaining can't reach floor.
+            if myv + self._suffix_my_max[i] < floor_value:
+                return
+
+            if i == self.n:
+                sc = self._score_offer(offer, opp_unit, floor_value)
+                if sc > best_score:
+                    best_score = sc
+                    best_offer = offer[:]
+                return
+
+            # Iterate high to low: tends to keep my value high and helps pruning
+            c = self.counts[i]
+            v = self.values[i]
+            for q in range(c, -1, -1):
+                offer[i] = q
+                rec(i + 1, myv + q * v)
+
+        rec(0, 0)
+        return best_offer
+
+    def _greedy_offer_for_target(self, target_my_value: float, opp_unit: List[float]) -> List[int]:
+        """
+        Take everything, then concede units that give opponent high value per our cost,
+        while keeping my_value >= target.
+        """
+        offer = self.counts[:]
+
+        # Give away all zero-value items immediately.
+        for i in range(self.n):
+            if self.values[i] == 0:
+                offer[i] = 0
+
+        myv = self._my_value(offer)
+        if myv <= target_my_value or self.total <= 0:
+            return offer
+
+        ratios = []
+        for i in range(self.n):
+            if offer[i] > 0 and self.values[i] > 0:
+                ratios.append((opp_unit[i] / self.values[i], i))
+        ratios.sort(reverse=True)
+
+        for _, i in ratios:
+            if myv <= target_my_value:
+                break
+            v = self.values[i]
+            if v <= 0:
+                continue
+            slack = myv - target_my_value
+            give = min(offer[i], int(slack // v))
+            if give > 0:
+                offer[i] -= give
+                myv -= give * v
+
+        return offer
+
+    def _search_heuristic(self, opp_unit: List[float], floor_value: float) -> List[int]:
+        p = self._progress()
+        candidates: List[List[int]] = []
+
+        # A few greedy targets (start high, drift down toward floor)
+        start = min(self.total, (0.93 - 0.40 * p) * self.total)
+        start = max(start, floor_value + 0.02 * self.total)
+        step = 0.06 * self.total
+        for k in range(7):
+            tgt = max(floor_value, start - k * step)
+            candidates.append(self._greedy_offer_for_target(tgt, opp_unit))
+        candidates.append(self._greedy_offer_for_target(floor_value, opp_unit))
+
+        # Randomized concessions guided by opp/our ratio.
+        # (More concessions for types opponent seems to care about and we care less about.)
+        for _ in range(140):
+            off = self.counts[:]
+            for i in range(self.n):
+                if self.values[i] == 0:
+                    off[i] = 0
+                    continue
+                if self.counts[i] == 0:
+                    continue
+                ratio = opp_unit[i] / (self.values[i] + 1e-9)
+                # Concession intensity increases over time.
+                inten = (0.25 + 0.65 * p) * (ratio / (1.0 + ratio))
+                give = int(round(inten * self.counts[i] + self._rng.random() * 0.75))
+                off[i] = max(0, self.counts[i] - min(self.counts[i], give))
+            candidates.append(off)
+
+        # Evaluate and pick best, then do small local improvements.
+        best = candidates[0]
+        best_score = -1e30
+        for off in candidates:
+            sc = self._score_offer(off, opp_unit, floor_value)
+            if sc > best_score:
+                best_score = sc
+                best = off
+
+        # Local search: single-unit tweaks.
+        best2 = best[:]
+        best2_score = best_score
+        for _ in range(90):
+            improved = False
+            for i in range(self.n):
+                if self.counts[i] <= 0:
+                    continue
+
+                # Try giving one more unit (if possible).
+                if best2[i] > 0:
+                    t = best2[:]
+                    t[i] -= 1
+                    sc = self._score_offer(t, opp_unit, floor_value)
+                    if sc > best2_score:
+                        best2, best2_score = t, sc
+                        improved = True
+
+                # Try taking one more unit (if possible).
+                if best2[i] < self.counts[i]:
+                    t = best2[:]
+                    t[i] += 1
+                    sc = self._score_offer(t, opp_unit, floor_value)
+                    if sc > best2_score:
+                        best2, best2_score = t, sc
+                        improved = True
+            if not improved:
+                break
+
+        return best2
 
     def _choose_counter_offer(self) -> List[int]:
-        """
-        Select an offer maximizing expected utility = my_value * P(accept),
-        where P(accept) is estimated from opponent pseudo-value and a time-dependent threshold.
-        """
         if self.total <= 0:
-            return self._all_zero_offer[:]
+            return [0] * self.n
 
-        p = self._progress()
         opp_unit = self._opp_unit_values_scaled()
+        floor_value = self._accept_threshold_value()
 
-        # Opponent "likely accept" threshold (estimated): 0.65 -> 0.35 of total
-        opp_th = (0.65 - 0.30 * p) * self.total
-        opp_k = max(1.0, 0.10 * self.total)  # softness
-
-        # Our target for counter-offers: start high, concede toward our acceptance threshold.
-        accept_val = self._accept_threshold()
-        start_target = (0.92 - 0.42 * p) * self.total  # 0.92 -> 0.50
-        start_target = max(start_target, accept_val + 0.02 * self.total)
-
-        # Explore a few target levels.
-        targets = []
-        t = start_target
-        step = 0.05 * self.total
-        for _ in range(8):
-            targets.append(max(accept_val, t))
-            t -= step
-            if t <= accept_val:
+        # If the offer space is small, enumerate exactly.
+        space = 1
+        for c in self.counts:
+            space *= (c + 1)
+            if space > 60000:
                 break
-        targets.append(accept_val)
 
-        best_offer = None
-        best_score = -1e18
+        if space <= 60000:
+            offer = self._search_by_enumeration(opp_unit, floor_value)
+        else:
+            offer = self._search_heuristic(opp_unit, floor_value)
 
-        for tgt in targets:
-            offer = self._build_offer_greedy(tgt, opp_unit)
-            myv = self._my_value(offer)
-            oppv = self._opp_est_value(offer, opp_unit)
+        # Store info for rejection-based update next time.
+        self._last_sent_offer = offer[:]
+        self._last_sent_opp_frac = self._opp_frac_of_total(offer, opp_unit)
+        return offer
 
-            # Acceptance probability model
-            prob = self._sigmoid((oppv - opp_th) / opp_k)
-
-            # Slightly favor deals that are more acceptable to them (tie-breaker)
-            score = myv * prob + 0.01 * oppv
-
-            if score > best_score:
-                best_score = score
-                best_offer = offer
-
-        return best_offer if best_offer is not None else self._build_offer_greedy(accept_val, opp_unit)
-
-    # ------------------------- Public API -------------------------
+    # ------------------------------ API --------------------------------
 
     def offer(self, o: Optional[List[int]]) -> Optional[List[int]]:
-        # Advance our internal turn counter at the start of our move.
-        # (We use turn_idx in thresholds, and it should reflect "this move".)
-        idx = self.turn_idx
-        self.turn_idx += 1
+        idx = self.turn
+        self.turn += 1
 
-        # Validate and process opponent offer (if present).
+        if self.total <= 0:
+            # If nothing matters to us, accept any valid offer, else propose zeros.
+            if o is not None and self._valid_offer(o):
+                return None
+            return [0] * self.n
+
+        # Process opponent offer if present.
         if o is not None:
-            if (
-                not isinstance(o, list)
-                or len(o) != self.n
-                or any((not isinstance(x, int)) for x in o)
-                or any(x < 0 or x > self.counts[i] for i, x in enumerate(o))
-            ):
-                # Invalid input from environment/opponent; play safe: make a valid offer.
+            if not self._valid_offer(o):
+                # Environment glitch or invalid input; respond with a safe valid counter.
                 return self._choose_counter_offer()
 
-            self._update_opp_pref(o)
+            self.best_received = max(self.best_received, self._my_value(o))
+
+            # Update opponent preference model and threshold bounds.
+            self._update_from_their_offer(o)
+            opp_unit = self._opp_unit_values_scaled()
+            self._update_opp_threshold_bounds(o, opp_unit)
 
             v = self._my_value(o)
-            if v > self.best_received:
-                self.best_received = v
+            if v >= self._accept_threshold_value():
+                return None
 
-            if v >= self._accept_threshold():
-                return None  # accept
-
-            # If we are second and this was our last move, rejecting ends talks anyway.
-            # In that case, accept if it meets a minimal practical floor (to avoid pure 0 deals).
+            # If we are second and this is our last decision, avoid ending with 0 too often.
             if self.me == 1 and idx >= self.max_rounds - 1:
-                floor = 0.20 * self.total
-                if self.total <= 0 or v >= floor:
+                if v >= 0.15 * self.total:
                     return None
-                # else: we counter (equivalent to no deal), but return a valid offer.
-                return self._choose_counter_offer()
 
-        # No offer to accept (either first move or we reject): make a counter-offer.
+        else:
+            # No incoming offer (we start). Reset last-sent info.
+            self._last_sent_offer = None
+            self._last_sent_opp_frac = None
+
         return self._choose_counter_offer()

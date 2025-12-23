@@ -3,118 +3,106 @@ class Agent:
         self.counts = counts
         self.values = values
         self.max_rounds = max_rounds
-        self.rounds_left = max_rounds * 2  # Total turns
         self.total_value = sum(c * v for c, v in zip(counts, values))
-        self.my_turn = me
         self.turn_count = 0
-        
-        # Track opponent's likely preferences
-        self.opponent_values = [0] * len(counts)
-        self.offers_seen = []
+        self.offers_received = []
         
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn_count += 1
-        turns_remaining = self.max_rounds * 2 - self.turn_count
+        turns_left = self.max_rounds * 2 - self.turn_count + 1
         
-        # If we received an offer, analyze it
         if o is not None:
-            self.offers_seen.append(o)
-            self._update_opponent_estimate(o)
-            
-            # Evaluate the offer
+            self.offers_received.append(o)
             my_value = sum(o[i] * self.values[i] for i in range(len(o)))
             
-            # Accept if offer is good enough based on time pressure
-            acceptance_threshold = self._get_acceptance_threshold(turns_remaining)
+            # Dynamic acceptance threshold based on progress
+            threshold = self._acceptance_threshold(turns_left, my_value)
             
-            if my_value >= acceptance_threshold * self.total_value:
+            if my_value >= threshold:
                 return None  # Accept
-            
-            # Accept any positive offer on the last turn
-            if turns_remaining == 0 and my_value > 0:
-                return None
         
-        # Make a counter-offer
-        return self._generate_offer(turns_remaining)
+        # Generate strategic counter-offer
+        return self._make_offer(turns_left)
     
-    def _update_opponent_estimate(self, o: list[int]):
-        """Estimate opponent's values based on what they're asking for."""
-        # Items they want more of are likely more valuable to them
-        their_share = [self.counts[i] - o[i] for i in range(len(o))]
-        
-        # Update estimates (simple heuristic)
-        for i in range(len(their_share)):
-            if their_share[i] > 0:
-                self.opponent_values[i] += their_share[i]
-    
-    def _get_acceptance_threshold(self, turns_remaining: int) -> float:
-        """Calculate minimum acceptable value as fraction of total."""
-        if turns_remaining <= 1:
-            return 0.1  # Accept almost anything on last turn
-        elif turns_remaining <= 3:
-            return 0.4  # Be more flexible near the end
-        elif turns_remaining <= 5:
-            return 0.5  # Accept fair deals
+    def _acceptance_threshold(self, turns_left: int, offered_value: int) -> float:
+        """Calculate minimum acceptable value."""
+        # Be more accepting as time runs out
+        if turns_left <= 1:
+            return 0  # Accept anything on last turn
+        elif turns_left <= 2:
+            return self.total_value * 0.35
+        elif turns_left <= 4:
+            return self.total_value * 0.45
+        elif turns_left <= 8:
+            return self.total_value * 0.5
         else:
-            return 0.6  # Be greedy early on
+            return self.total_value * 0.55
     
-    def _generate_offer(self, turns_remaining: int) -> list[int]:
-        """Generate a strategic counter-offer."""
-        # Start with a greedy baseline
-        target_ratio = self._get_target_ratio(turns_remaining)
+    def _estimate_opponent_values(self) -> list[float]:
+        """Estimate opponent's values from their offers."""
+        if not self.offers_received:
+            # Assume opponent values items inversely to us
+            return [1.0 / (v + 1) for v in self.values]
         
-        # Try to find an offer that gives us our target while being strategic
-        offer = self._find_strategic_split(target_ratio)
+        # Analyze what opponent is keeping vs giving
+        opp_estimates = [0.0] * len(self.counts)
         
-        # Ensure we're not offering more than available
-        for i in range(len(offer)):
-            offer[i] = min(offer[i], self.counts[i])
+        for offer in self.offers_received:
+            for i in range(len(offer)):
+                # What they keep suggests higher value
+                they_keep = self.counts[i] - offer[i]
+                opp_estimates[i] += they_keep
         
-        return offer
+        # Normalize
+        total = sum(opp_estimates) or 1
+        return [e / total for e in opp_estimates]
     
-    def _get_target_ratio(self, turns_remaining: int) -> float:
-        """How much of total value we should aim for."""
-        if turns_remaining <= 2:
-            return 0.45  # Be very flexible at the end
-        elif turns_remaining <= 4:
-            return 0.55  # Moderate flexibility
-        elif turns_remaining <= 6:
-            return 0.65  # Still aiming high
+    def _make_offer(self, turns_left: int) -> list[int]:
+        """Generate a strategic offer."""
+        # Target value decreases over time (concession strategy)
+        if turns_left <= 2:
+            target_ratio = 0.4
+        elif turns_left <= 4:
+            target_ratio = 0.5
+        elif turns_left <= 8:
+            target_ratio = 0.6
         else:
-            return 0.75  # Start greedy
-    
-    def _find_strategic_split(self, target_ratio: float) -> list[int]:
-        """Find a split that aims for target_ratio of value."""
+            target_ratio = 0.7
+        
         target_value = target_ratio * self.total_value
         
-        # Create a list of items sorted by value to me
+        # Estimate opponent preferences
+        opp_values = self._estimate_opponent_values()
+        
+        # Create items list with strategic scoring
         items = []
         for i in range(len(self.counts)):
             for _ in range(self.counts[i]):
-                items.append((self.values[i], i))
+                # Score: my value minus estimated opponent value
+                # This helps us take items we value more and they value less
+                my_val = self.values[i]
+                opp_val = opp_values[i] * self.total_value / len(self.counts)
+                score = my_val - opp_val * 0.5
+                items.append((score, my_val, i))
         
-        # Sort by my value (descending) but consider opponent preferences
-        items.sort(key=lambda x: (
-            x[0] - self.opponent_values[x[1]] * 0.1,  # Prefer items opponent values less
-            -x[0]  # Then by my value
-        ), reverse=True)
+        # Sort by strategic score
+        items.sort(reverse=True)
         
-        # Take items greedily until we hit target
+        # Greedily select items
         offer = [0] * len(self.counts)
         current_value = 0
         
-        for value, idx in items:
-            if current_value < target_value or value > 0:
-                offer[idx] += 1
-                current_value += value
+        for score, my_val, idx in items:
+            offer[idx] += 1
+            current_value += my_val
             
             if current_value >= target_value:
                 break
         
-        # If we haven't reached minimum acceptable, take more high-value items
-        if current_value < 0.4 * self.total_value:
-            for i in range(len(offer)):
-                if self.values[i] > 0:
-                    offer[i] = self.counts[i]
+        # Ensure we ask for something valuable
+        if current_value < self.total_value * 0.3:
+            # Fallback: take all items we value
+            offer = [self.counts[i] if self.values[i] > 0 else 0 
+                     for i in range(len(self.counts))]
         
         return offer

@@ -7,7 +7,8 @@ class Agent:
         self.values = values
         self.total = sum(c * v for c, v in zip(counts, values))
         self.max_rounds = max_rounds
-        self.rounds = self.max_rounds * 2
+        self.total_turns = max_rounds * 2
+        self.rounds = self.total_turns
         self.index = 0
         # Generate all possible splits (what I get), sorted by my value descending
         ranges = [range(count + 1) for count in counts]
@@ -18,18 +19,20 @@ class Agent:
         self.splits.sort(key=lambda x: x[1], reverse=True)
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        if o is None:
-            # First offer: propose the highest value split for me
-            return self.splits[0][0]
-        else:
+        self.rounds = max(self.rounds - 1, 0)
+        if o is not None:
             # Partner offered o; calculate value to me
             offered_v = sum(o[i] * self.values[i] for i in range(len(o)))
-            # Threshold decreases as rounds left decrease
-            rounds_left = max(self.rounds, 1)  # avoid division by zero, use at least 1
-            threshold = self.total * (rounds_left / (self.max_rounds * 2))
+            # Threshold: start at 0.5 * total, decrease to 0
+            progress = 1 - (self.rounds / self.total_turns) if self.total_turns > 0 else 1
+            threshold = self.total * (0.5 - 0.5 * progress)
             if offered_v >= threshold:
                 return None  # Accept
-            else:
-                # Offer next split in the list (more generous)
-                self.index = min(self.index + 1, len(self.splits) - 1)
-                return self.splits[self.index][0]
+            
+            # If not accepted and it's my turn to counter, offer more generous split
+            # Increase index to move to a lower-value split for me (conceding)
+            self.index = min(self.index + 1, len(self.splits) - 1)
+            return self.splits[self.index][0]
+        else:
+            # First offer: propose the highest value split for me
+            return self.splits[self.index][0]

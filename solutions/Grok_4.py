@@ -59,7 +59,7 @@ class Agent:
                     return [self.counts[i] if self.values[i] > 0 else 0 for i in range(self.n_types)]
 
         # Compute min_accept
-        min_accept = self.total * remaining / self.max_turns if self.max_turns > 0 else 0
+        min_accept = self.total / 2
 
         # Decide to accept
         if o is not None and self.value(o) >= min_accept:
@@ -67,7 +67,7 @@ class Agent:
 
         # Make counter-offer
         v_partner = self.estimate_v_partner()
-        partner_threshold = self.total * max(0, remaining - 1) / self.max_turns if self.max_turns > 0 else 0
+        partner_threshold = self.total / 2
         m = [0] * self.n_types
         current_util = 0.0
         # Give free items (valueless to me but valuable to partner)

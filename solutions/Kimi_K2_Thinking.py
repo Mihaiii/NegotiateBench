@@ -1,167 +1,141 @@
 import math
-from typing import List
+from typing import List, Optional
 
 class Agent:
     def __init__(self, me: int, counts: List[int], values: List[int], max_rounds: int):
-        self.me = me                    # 0 if we move first, 1 if second
-        self.counts = counts             # list of item counts per type
-        self.values = values             # our valuation per item type
+        self.me = me
+        self.counts = counts
+        self.values = values
         self.max_rounds = max_rounds
         self.n_types = len(counts)
-        self.total_items = sum(counts)
+        
         self.total_value = sum(c * v for c, v in zip(counts, values))
-        self.total_turns = max_rounds * 2
         self.turns_passed = 0
-
-        # Opponent's value estimate: start uniform (same total value)
-        if self.total_items > 0:
-            self.opp_est = [self.total_value / self.total_items] * self.n_types
+        
+        # Initialize opponent estimates with deterministic variation
+        total_items = sum(counts)
+        if total_items > 0:
+            base = self.total_value / total_items
+            # Use type index to create variation (deterministic)
+            self.opp_est = [base * (0.8 + 0.4 * (i * 3 % 7) / 7) for i in range(self.n_types)]
+            
+            # Normalize to match total value
+            total = sum(self.opp_est[i] * counts[i] for i in range(self.n_types))
+            if total > 0:
+                scale = self.total_value / total
+                self.opp_est = [v * scale for v in self.opp_est]
         else:
             self.opp_est = [0.0] * self.n_types
-
-    # -------------------------------------------------------------
-    # Update opponent value estimate based on their last offer
-    def _update_opp_estimate(self, o: List[int]):
-        # o[i] = number of items of type i the opponent offered to us
-        keep = [self.counts[i] - o[i] for i in range(self.n_types)]
-        total_keep = sum(keep)
-        if total_keep == 0:
-            # No information: opponent gave away everything
+    
+    def _update_opp_estimate(self, o: List[int]) -> None:
+        """Stable opponent value estimation using log-space updates"""
+        if o is None:
             return
-        avg_keep_frac = total_keep / self.total_items
-        new_est = [0.0] * self.n_types
+        
         for i in range(self.n_types):
             if self.counts[i] == 0:
-                new_est[i] = self.opp_est[i]
                 continue
-            keep_frac_i = keep[i] / self.counts[i]
-            # multiplicative factor relative to average
-            factor = keep_frac_i / avg_keep_frac
-            new_est[i] = self.opp_est[i] * factor
-
-        # renormalise so that sum_i new_est[i] * counts[i] == total_value
-        total_est = sum(new_est[i] * self.counts[i] for i in range(self.n_types))
-        if total_est > 0:
-            scale = self.total_value / total_est
-            for i in range(self.n_types):
-                new_est[i] *= scale
-        self.opp_est = new_est
-
-    # -------------------------------------------------------------
-    def _compute_targets(self) -> (float, float, float):
-        """Return (target_us, target_opp, capacity) for the current turn."""
-        # opponent's minimal share increases linearly from 0 to 0.5 of total value
-        opp_share = (self.turns_passed / self.total_turns) * 0.5
-        target_opp = self.total_value * opp_share
-        target_us = self.total_value - target_opp          # what we would like to obtain
-        # capacity in terms of opponent value we are allowed to “spend”
-        capacity = target_us
-        return target_us, target_opp, capacity
-
-    # -------------------------------------------------------------
-    def _solve_allocation(self, capacity: float):
-        """
-        Solve the knapsack: maximise our profit subject to
-        sum_i (opp_est[i] * x[i]) <= capacity.
-        Returns (allocation list, profit).
-        """
-        # Types with zero value to us are given to opponent – they don't affect profit
+            
+            keep_frac = (self.counts[i] - o[i]) / self.counts[i]
+            
+            # Log-space EMA update for stability
+            log_old = math.log(max(1e-6, self.opp_est[i]))
+            # Target: higher keep fraction → higher estimated value
+            log_target = log_old + 1.5 * (keep_frac - 0.5)
+            
+            alpha = 0.15  # Conservative learning rate
+            self.opp_est[i] = math.exp((1 - alpha) * log_old + alpha * log_target)
+        
+        # Renormalize to maintain total value
+        total = sum(self.opp_est[i] * self.counts[i] for i in range(self.n_types))
+        if total > 0:
+            scale = self.total_value / total
+            self.opp_est = [v * scale for v in self.opp_est]
+    
+    def _our_value(self, alloc: List[int]) -> int:
+        """Calculate value of allocation to us"""
+        return sum(a * v for a, v in zip(alloc, self.values))
+    
+    def _greedy_alloc(self, opp_budget: float) -> (List[int], int):
+        """Greedy allocation: maximize our value within opponent's budget"""
+        if opp_budget <= 0:
+            return [0] * self.n_types, 0
+        
+        # Can we take everything?
+        total_opp_cost = sum(self.opp_est[i] * self.counts[i] for i in range(self.n_types))
+        if opp_budget >= total_opp_cost - 1e-9:
+            return self.counts.copy(), self.total_value
+        
         alloc = [0] * self.n_types
-        profit = 0
-
-        # If total_value is zero, any split is fine; we keep nothing.
-        if self.total_value == 0:
-            return alloc, profit
-
-        # We'll solve a knapsack on profit (integer) minimizing opponent weight.
-        max_profit = self.total_value
-        dp = [float('inf')] * (max_profit + 1)
-        dp[0] = 0.0
-
-        # predecessor arrays to reconstruct the solution
-        prev_piece = [-1] * (max_profit + 1)
-        prev_profit = [-1] * (max_profit + 1)
-
-        # Create pieces using binary splitting for each type where we value the item > 0
-        pieces = []   # each piece is (type_index, count, profit, weight)
+        our_val = 0
+        opp_cost = 0
+        
+        # Zero-cost items first (free value for us)
         for i in range(self.n_types):
-            if self.values[i] == 0:
-                # we will keep none of these (give them to opponent)
-                continue
-            cnt = self.counts[i]
-            val = self.values[i]
-            # opponent weight per item of this type
-            w_per = self.opp_est[i]
-            # decompose cnt into powers of two
-            k = 1
-            while cnt > 0:
-                take = min(k, cnt)
-                profit = take * val
-                weight = take * w_per
-                pieces.append((i, take, profit, weight))
-                cnt -= take
-                k <<= 1
-
-        # DP over profit
-        for idx, (typ, cnt, gain, wgt) in enumerate(pieces):
-            for p in range(max_profit - gain, -1, -1):
-                if dp[p] + wgt < dp[p + gain]:
-                    dp[p + gain] = dp[p] + wgt
-                    prev_piece[p + gain] = idx
-                    prev_profit[p + gain] = p
-
-        # Find the best profit whose required opponent weight does not exceed capacity
-        best_profit = 0
-        for p in range(max_profit, -1, -1):
-            if dp[p] <= capacity + 1e-9:   # allow tiny tolerance
-                best_profit = p
+            if self.opp_est[i] < 1e-9 and self.values[i] > 0:
+                alloc[i] = self.counts[i]
+                our_val += alloc[i] * self.values[i]
+        
+        # Sort remaining by ratio: our value / opponent cost
+        items = []
+        for i in range(self.n_types):
+            if self.counts[i] > 0 and alloc[i] == 0 and self.opp_est[i] >= 1e-9:
+                ratio = self.values[i] / (self.opp_est[i] + 1e-9)
+                items.append((ratio, i, self.counts[i]))
+        
+        items.sort(reverse=True, key=lambda x: x[0])
+        
+        for ratio, i, cnt in items:
+            if opp_cost >= opp_budget:
                 break
-
-        # Reconstruct the allocation for types that have positive value to us
-        for _ in range(self.n_types):
-            # placeholder to avoid errors
-            pass
-        # Actually reconstruct:
-        cur = best_profit
-        while cur > 0 and prev_piece[cur] != -1:
-            idx = prev_piece[cur]
-            typ, cnt, gain, wgt = pieces[idx]
-            alloc[typ] += cnt
-            cur = prev_profit[cur]
-
-        # For items we value zero, we keep none (give them to opponent)
-        for i in range(self.n_types):
-            if self.values[i] == 0:
-                alloc[i] = 0
-
-        # The profit we obtain is exactly best_profit
-        return alloc, best_profit
-
-    # -------------------------------------------------------------
-    def offer(self, o: List[int] | None) -> List[int] | None:
-        # Count this turn
+            
+            max_take = min(cnt, int((opp_budget - opp_cost + 1e-9) / self.opp_est[i]))
+            if max_take > 0:
+                alloc[i] = max_take
+                our_val += max_take * self.values[i]
+                opp_cost += max_take * self.opp_est[i]
+        
+        return alloc, our_val
+    
+    def offer(self, o: Optional[List[int]]) -> Optional[List[int]]:
         self.turns_passed += 1
-
-        # Update opponent model if we received an offer
+        total_turns = self.max_rounds * 2
+        turns_left = total_turns - self.turns_passed
+        
+        # Update opponent model and get offer value
+        offer_val = self._our_value(o) if o is not None else 0
         if o is not None:
             self._update_opp_estimate(o)
-
-        # Determine our current target and the opponent capacity we may consume
-        target_us, target_opp, capacity = self._compute_targets()
-
-        # Solve the knapsack to get the best allocation we can achieve under capacity
-        allocation, profit = self._solve_allocation(capacity)
-
-        # Acceptance threshold: if we can reach our target, we aim for it;
-        # otherwise we settle for the best we can obtain (profit).
-        threshold = min(target_us, profit)
-
-        # If we have an offer, decide whether to accept it
-        if o is not None:
-            # value of the opponent's offer to us
-            value_us = sum(self.values[i] * o[i] for i in range(self.n_types))
-            if value_us >= threshold - 1e-9:
-                return None   # accept
-
-        # Otherwise we make a counter‑offer (the allocation we just computed)
-        return allocation
+        
+        # Deadline-aware acceptance threshold
+        progress = self.turns_passed / total_turns
+        
+        if turns_left == 0:
+            threshold = 0.0  # Accept anything
+        elif turns_left <= 2:
+            threshold = 0.22 * self.total_value
+        else:
+            threshold = (0.66 - 0.34 * progress) * self.total_value
+        
+        # Accept if offer is good enough
+        if o is not None and offer_val >= threshold:
+            return None
+        
+        # Determine opponent's value budget (what they're likely to accept)
+        opp_budget = self.total_value * (0.60 - 0.28 * progress)
+        
+        # Our target: improve over current offer or meet threshold
+        target = max(threshold, offer_val * 1.06) if o is not None else threshold
+        
+        # Near deadline: cap our greediness
+        if turns_left <= 2:
+            target = min(target, self.total_value * 0.62)
+        
+        # Find best allocation within budget
+        alloc, val = self._greedy_alloc(opp_budget)
+        
+        # If we can't beat their offer by enough near deadline, accept
+        if o is not None and turns_left <= 2 and val < offer_val * 1.08:
+            return None
+        
+        return alloc

@@ -3,97 +3,95 @@ class Agent:
         self.me = me
         self.counts = counts
         self.values = values
-        self.max_rounds = max_rounds
-        self.total_turns = max_rounds * 2
-        self.current_turn = 0
+        self.total_rounds = max_rounds
+        self.current_round = 0
         self.total_value = sum(c * v for c, v in zip(counts, values))
-        
-        # Sort items by efficiency (value per unit, though here units are 1)
-        self.pref_indices = sorted(
-            range(len(counts)),
-            key=lambda i: self.values[i],
-            reverse=True
-        )
+        # Rank items by value to us (highest first)
+        self.pref_indices = sorted(range(len(counts)), key=lambda i: values[i], reverse=True)
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        self.current_turn += 1
-        turns_remaining = self.total_turns - self.current_turn
+        # Increment round when it's our turn (either as 1st or 2nd mover)
+        if self.me == 0 or o is not None:
+            self.current_round += 1
         
-        # 1. EVALUATE PARTNER'S OFFER
+        # Calculate turns remaining for the whole negotiation (2 turns per round)
+        # Turn 1: Player 0, Turn 2: Player 1... Last Turn: Player 1 (Turn 2*max_rounds)
+        total_turns = self.total_rounds * 2
+        current_turn_count = (self.current_round - 1) * 2 + (1 if self.me == 0 else 2)
+        turns_left = total_turns - current_turn_count
+
+        # 1. Evaluate Partner's Offer
         if o is not None:
             offer_val = sum(o[i] * self.values[i] for i in range(len(o)))
             
-            # Acceptance logic
-            # On the last turn, accept anything > 0 (or even 0 if total is 0) 
-            # to avoid the zero-payout outcome.
-            if turns_remaining <= 0:
-                if offer_val > 0 or self.total_value == 0:
-                    return None
+            # Acceptance Threshold
+            # Be extremely firm early, but concede to ensure we don't get 0
+            if turns_left <= 0:
+                # Last possible turn (we are player 1): Accept anything > 0
+                return None if offer_val > 0 or self.total_value == 0 else self._make_offer(0.5)
             
-            # Dynamic threshold decreases as time runs out
-            progress = self.current_turn / self.total_turns
-            if progress < 0.25:
+            progress = current_turn_count / total_turns
+            if progress < 0.4:
                 threshold = 0.9 * self.total_value
-            elif progress < 0.5:
-                threshold = 0.8 * self.total_value
-            elif progress < 0.8:
-                threshold = 0.7 * self.total_value
+            elif progress < 0.7:
+                threshold = 0.75 * self.total_value
+            elif progress < 0.9:
+                threshold = 0.6 * self.total_value
             else:
-                # Close to the end: accept lower offers to ensure a deal
                 threshold = 0.5 * self.total_value
-            
+
             if offer_val >= max(threshold, 1):
                 return None
 
-        # 2. CONSTRUCT COUNTER-OFFER
-        # Determine a target value based on progress
-        # Start by asking for ~100% and concede down to ~60% naturally
-        progress = self.current_turn / self.total_turns
-        target_ratio = max(0.6, 1.0 - (0.5 * progress))
-        
-        # In the final round for us, if we are the second mover, we might need to be extra flexible
-        if turns_remaining <= 1:
+        # 2. Construct Counter-Offer
+        # Calculation of target ratio based on how much time is left
+        if turns_left > total_turns * 0.5:
+            target_ratio = 1.0
+        elif turns_left > 2:
+            # Gradually slide from 100% down to 60%
+            rem_scale = (turns_left - 2) / (total_turns * 0.5)
+            target_ratio = 0.6 + 0.4 * rem_scale
+        else:
+            # Final attempts: 50/50 split
             target_ratio = 0.5
-            
-        target_val = target_ratio * self.total_value
-        
+
+        return self._make_offer(target_ratio)
+
+    def _make_offer(self, ratio: float) -> list[int]:
+        target_val = ratio * self.total_value
         my_offer = [0] * len(self.counts)
-        accumulated_val = 0
+        current_val = 0
         
-        # Greedy selection for our offer
+        # Greedy selection of best items for us
         for i in self.pref_indices:
+            if self.values[i] == 0: continue
             for _ in range(self.counts[i]):
-                if accumulated_val < target_val:
+                if current_val < target_val:
                     my_offer[i] += 1
-                    accumulated_val += self.values[i]
+                    current_val += self.values[i]
                 else:
                     break
 
-        # 3. STRATEGIC CONCESSION ("The Sweetener")
-        # Ensure the partner gets at least something if possible, 
-        # especially items we value at 0.
-        partner_gets_nothing = True
-        for i in range(len(self.counts)):
-            if self.counts[i] - my_offer[i] > 0:
-                partner_gets_nothing = False
-                break
+        # Strategic Concession: The Partner "Sweetener"
+        # If we reached our target but didn't give the partner anything, they will reject.
+        # Ensure they get something, starting with items worthless to us.
+        partner_has_items = any((self.counts[i] - my_offer[i]) > 0 for i in range(len(self.counts)))
         
-        if partner_gets_nothing:
-            # Give away all items that are worth 0 to us
+        if not partner_has_items:
+            # Give them all items that are worth 0 to us
             for i in range(len(self.counts)):
                 if self.values[i] == 0:
                     my_offer[i] = 0
             
-            # Check again
-            still_nothing = (sum(my_offer) == sum(self.counts))
-            if still_nothing and sum(my_offer) > 0:
-                # Concede the least valuable item to break the stalemate
-                idx = self.pref_indices[-1]
-                if my_offer[idx] > 0:
-                    my_offer[idx] -= 1
+            # If they still have nothing (no 0-value items exist), give 1 of our least valuable
+            if sum(my_offer) == sum(self.counts):
+                for i in reversed(self.pref_indices):
+                    if my_offer[i] > 0:
+                        my_offer[i] -= 1
+                        break
 
-        # Final sanity check: never return an empty list or total zero if we have items
+        # Sanity check: Ensure we aren't returning an empty deal if we have value
         if sum(my_offer) == 0 and self.total_value > 0:
             my_offer[self.pref_indices[0]] = 1
-                
+
         return my_offer

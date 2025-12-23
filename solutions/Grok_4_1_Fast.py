@@ -1,112 +1,86 @@
-import itertools
+import math
 
 class Agent:
     def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
-        self.me = me
         self.counts = counts[:]
         self.values = values[:]
-        self.n = len(counts)
+        self.n_types = len(counts)
         self.total = sum(c * v for c, v in zip(counts, values))
-        self.max_turns = 2 * max_rounds
-        self.turn_count = 0
-        self.opp_fracs_history = []
-        self.product_ranges = [range(counts[i] + 1) for i in range(self.n)]
-        est_num = 1
-        too_large = False
-        for rlen in map(len, self.product_ranges):
-            est_num *= rlen
-            if est_num > 1000000:
-                too_large = True
+        self.max_rounds = max_rounds
+        self.me = me
+        self.n_calls = 0
+        total_items = sum(counts)
+        avg = self.total / total_items if total_items > 0 else 0.0
+        self.est_opp = [avg] * self.n_types
+        self.opp_offers = []
+
+    def opp_val_of_alloc(self, alloc: list[int]) -> float:
+        return sum(self.est_opp[i] * alloc[i] for i in range(self.n_types))
+
+    def update_est_opp(self, o: list[int]):
+        self.opp_offers.append(o)
+        num_offers = len(self.opp_offers)
+        avg_keep = [0.0] * self.n_types
+        for i in range(self.n_types):
+            sum_keep = sum(1.0 - oo[i] / self.counts[i] if self.counts[i] > 0 else 1.0 for oo in self.opp_offers)
+            avg_keep[i] = sum_keep / num_offers
+        sum_weight = sum(avg_keep[j] * self.counts[j] for j in range(self.n_types))
+        if sum_weight > 0:
+            scale = float(self.total) / sum_weight
+            self.est_opp = [avg_keep[j] * scale for j in range(self.n_types)]
+
+    def get_greedy_prop(self, target: float) -> list[int]:
+        if target <= 0:
+            return [0] * self.n_types
+        type_order = sorted(range(self.n_types), key=lambda x: self.values[x] / max(self.est_opp[x], 1e-6), reverse=True)
+        prop = [0] * self.n_types
+        rem = target
+        for t in type_order:
+            if rem <= 0:
                 break
-        if not too_large:
-            self.possible = list(itertools.product(*self.product_ranges))
-            self.num_possible = len(self.possible)
-            self.my_vals = [sum(self.values[i] * self.possible[k][i] for i in range(self.n)) for k in range(self.num_possible)]
-            self.order = sorted(range(self.num_possible), key=lambda k: -self.my_vals[k])
-        else:
-            self.possible = None
-            self.order = None
-            self.my_vals = None
+            v = self.values[t]
+            if v <= 0:
+                continue
+            max_take = self.counts[t]
+            needed = math.ceil(rem / v)
+            take = min(max_take, needed)
+            prop[t] = take
+            rem -= take * v
+        return prop
+
+    def _should_accept(self, myval: float, call_num: int) -> bool:
+        if self.max_rounds <= 1:
+            return myval >= 0.01 * self.total
+        progress = min(1.0, (call_num - 1.0) / max(self.max_rounds - 1.0, 1.0))
+        thresh_frac = 0.5 - 0.48 * progress
+        return myval >= thresh_frac * self.total
+
+    def _generate_proposal(self, call_num: int) -> list[int]:
+        if self.max_rounds <= 1:
+            return self.get_greedy_prop(0.5 * self.total)
+        progress = min(1.0, (call_num - 1.0) / max(self.max_rounds - 1.0, 1.0))
+        opp_thresh_frac = 0.5 - 0.3 * progress
+        opp_threshold = opp_thresh_frac * self.total
+        fracs = [1.0 - 0.05 * i for i in range(21)]
+        candidates = []
+        for f in fracs:
+            prop = self.get_greedy_prop(f * self.total)
+            myv = sum(self.values[i] * prop[i] for i in range(self.n_types))
+            rest = [self.counts[i] - prop[i] for i in range(self.n_types)]
+            oppv_est = self.opp_val_of_alloc(rest)
+            candidates.append((myv, oppv_est, prop))
+        candidates.sort(key=lambda x: -x[0])
+        for myv, oppv, prop in candidates:
+            if oppv >= opp_threshold:
+                return prop
+        return candidates[0][2]
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        self.turn_count += 1
+        self.n_calls += 1
         if o is not None:
-            o_list = list(o)
-            opp_keep = [self.counts[i] - o_list[i] for i in range(self.n)]
-            fracs = [opp_keep[i] / self.counts[i] if self.counts[i] > 0 else 0.0 for i in range(self.n)]
-            self.opp_fracs_history.append(tuple(fracs))
-
-        global_turn = 2 * self.turn_count - 1 if self.me == 0 else 2 * self.turn_count
-        remaining_turns = max(0, self.max_turns - global_turn + 1)
-        frac_rem = remaining_turns / self.max_turns if self.max_turns > 0 else 0.0
-
-        # Compute opp_vals
-        num_obs = len(self.opp_fracs_history)
-        avg_frac_keep = [0.0] * self.n
-        if num_obs > 0:
-            recent = self.opp_fracs_history[-3:] if num_obs >= 3 else self.opp_fracs_history
-            num_r = len(recent)
-            for i in range(self.n):
-                avg_frac_keep[i] = sum(h[i] for h in recent) / num_r
-        weighted = sum(avg_frac_keep[i] * self.counts[i] for i in range(self.n))
-        if weighted > 1e-9:
-            opp_vals = [avg_frac_keep[i] * self.total / weighted for i in range(self.n)]
-        else:
-            total_items = sum(self.counts)
-            u = self.total / total_items if total_items > 0 else 0.0
-            opp_vals = [u] * self.n
-
-        # Decide to accept
-        if o is not None:
-            my_val_offer = sum(self.values[i] * (self.counts[i] - o[i]) for i in range(self.n))
-            accept_threshold = 0.0 if remaining_turns <= 1 else self.total * (0.40 + 0.20 * frac_rem)
-            if my_val_offer >= accept_threshold:
+            self.update_est_opp(o)
+            my_val_accept = sum(self.values[i] * o[i] for i in range(self.n_types))
+            if self._should_accept(my_val_accept, self.n_calls):
                 return None
-
-        # Make counter-offer
-        frac_rem_opp = max(0.0, (remaining_turns - 1) / self.max_turns)
-        opp_their_res = self.total * (0.40 + 0.20 * frac_rem_opp)
-        best_x = None
-        if self.possible is not None:
-            best_my_val = -1.0
-            for k in self.order:
-                x = self.possible[k]
-                opp_get = tuple(self.counts[i] - x[i] for i in range(self.n))
-                opp_gv = sum(opp_vals[i] * opp_get[i] for i in range(self.n))
-                my_gv = self.my_vals[k]
-                if opp_gv >= opp_their_res and my_gv > best_my_val:
-                    best_my_val = my_gv
-                    best_x = list(x)
-                    break
-            if best_x is None:
-                best_x = list(self.possible[self.order[0]])
-        else:
-            # Greedy knapsack approx
-            total_opp_val = sum(opp_vals[i] * self.counts[i] for i in range(self.n))
-            cap = total_opp_val - opp_their_res
-            if cap <= 0:
-                best_x = [0] * self.n
-            else:
-                densities = []
-                for i in range(self.n):
-                    w = opp_vals[i]
-                    v = self.values[i]
-                    dens = float('inf') if w <= 0 and v > 0 else (v / w if w > 0 else 0.0)
-                    densities.append((dens, i))
-                densities.sort(reverse=True)
-                x = [0] * self.n
-                curr_used = 0.0
-                for _, i in densities:
-                    if curr_used >= cap:
-                        break
-                    rem_cap = cap - curr_used
-                    w_per = opp_vals[i]
-                    max_k = self.counts[i]
-                    if w_per > 0:
-                        k = min(max_k, int(rem_cap / w_per))
-                    else:
-                        k = max_k
-                    x[i] = k
-                    curr_used += k * w_per
-                best_x = x
-        return best_x
+        prop = self._generate_proposal(self.n_calls)
+        return prop

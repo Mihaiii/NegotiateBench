@@ -5,103 +5,137 @@ class Agent:
         self.max_rounds = max_rounds
         self.total_value = sum(c * v for c, v in zip(counts, values))
         self.turn_count = 0
-        self.offers_received = []
+        self.my_offers = []
+        self.their_offers = []
+        self.me = me
         
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn_count += 1
-        turns_left = self.max_rounds * 2 - self.turn_count + 1
+        total_turns = self.max_rounds * 2
+        turns_left = total_turns - self.turn_count + 1
         
         if o is not None:
-            self.offers_received.append(o)
+            self.their_offers.append(o)
             my_value = sum(o[i] * self.values[i] for i in range(len(o)))
             
-            # Dynamic acceptance threshold based on progress
-            threshold = self._acceptance_threshold(turns_left, my_value)
-            
-            if my_value >= threshold:
-                return None  # Accept
+            # Accept based on strategic threshold
+            if self._should_accept(my_value, turns_left):
+                return None
         
-        # Generate strategic counter-offer
-        return self._make_offer(turns_left)
+        # Generate counter-offer
+        counter = self._make_offer(turns_left)
+        self.my_offers.append(counter)
+        return counter
     
-    def _acceptance_threshold(self, turns_left: int, offered_value: int) -> float:
-        """Calculate minimum acceptable value."""
-        # Be more accepting as time runs out
+    def _should_accept(self, offered_value: int, turns_left: int) -> bool:
+        """Decide whether to accept an offer."""
         if turns_left <= 1:
-            return 0  # Accept anything on last turn
-        elif turns_left <= 2:
-            return self.total_value * 0.35
-        elif turns_left <= 4:
-            return self.total_value * 0.45
-        elif turns_left <= 8:
-            return self.total_value * 0.5
-        else:
-            return self.total_value * 0.55
+            # Last turn - accept anything positive
+            return offered_value > 0
+        
+        # Calculate base threshold that decreases over time
+        progress = 1.0 - (turns_left / (self.max_rounds * 2))
+        
+        # Start at 60% and decrease to 30%
+        base_threshold = 0.6 - (0.3 * progress)
+        
+        # Check if opponent is making concessions
+        if len(self.their_offers) >= 2:
+            prev_value = sum(self.their_offers[-2][i] * self.values[i] for i in range(len(self.values)))
+            if offered_value > prev_value:
+                # They're conceding, be slightly more demanding
+                base_threshold += 0.05
+            elif offered_value < prev_value and turns_left <= 4:
+                # They're getting tougher near the end, be flexible
+                base_threshold -= 0.1
+        
+        # Near the end, be more accepting
+        if turns_left <= 3:
+            base_threshold = min(base_threshold, 0.35)
+        if turns_left <= 2:
+            base_threshold = min(base_threshold, 0.25)
+        
+        return offered_value >= self.total_value * base_threshold
     
-    def _estimate_opponent_values(self) -> list[float]:
-        """Estimate opponent's values from their offers."""
-        if not self.offers_received:
-            # Assume opponent values items inversely to us
-            return [1.0 / (v + 1) for v in self.values]
+    def _estimate_opponent_values(self) -> list[int]:
+        """Estimate opponent's valuation of each item type."""
+        if not self.their_offers:
+            # Default: assume inverse preferences
+            total = sum(self.values) or 1
+            return [max(1, total - v) for v in self.values]
         
-        # Analyze what opponent is keeping vs giving
-        opp_estimates = [0.0] * len(self.counts)
-        
-        for offer in self.offers_received:
+        # Analyze what they consistently keep
+        kept_counts = [0] * len(self.counts)
+        for offer in self.their_offers:
             for i in range(len(offer)):
-                # What they keep suggests higher value
-                they_keep = self.counts[i] - offer[i]
-                opp_estimates[i] += they_keep
+                kept_counts[i] += self.counts[i] - offer[i]
         
-        # Normalize
-        total = sum(opp_estimates) or 1
-        return [e / total for e in opp_estimates]
+        # Items they keep more are likely more valuable to them
+        # Normalize to total_value
+        total_kept = sum(kept_counts) or 1
+        estimated = [int(self.total_value * k / total_kept) for k in kept_counts]
+        
+        # Ensure total matches
+        current_total = sum(estimated[i] * self.counts[i] for i in range(len(estimated)))
+        if current_total > 0:
+            scale = self.total_value / current_total
+            estimated = [max(0, int(e * scale)) for e in estimated]
+        
+        return estimated
     
     def _make_offer(self, turns_left: int) -> list[int]:
-        """Generate a strategic offer."""
-        # Target value decreases over time (concession strategy)
+        """Generate a strategic counter-offer."""
+        # Calculate target value based on time pressure
+        progress = 1.0 - (turns_left / (self.max_rounds * 2))
+        
+        # Start aggressive (70%) and concede to fair (50%)
         if turns_left <= 2:
-            target_ratio = 0.4
+            target_ratio = 0.45
         elif turns_left <= 4:
-            target_ratio = 0.5
+            target_ratio = 0.50
         elif turns_left <= 8:
-            target_ratio = 0.6
+            target_ratio = 0.55
         else:
-            target_ratio = 0.7
+            target_ratio = 0.65 - (0.10 * progress)
+        
+        # If opponent is being very stubborn, concede faster
+        if len(self.their_offers) >= 3:
+            recent_offers = self.their_offers[-3:]
+            values = [sum(o[i] * self.values[i] for i in range(len(o))) for o in recent_offers]
+            if max(values) - min(values) < self.total_value * 0.05:
+                # They're not budging much, concede more
+                target_ratio -= 0.1
         
         target_value = target_ratio * self.total_value
         
-        # Estimate opponent preferences
+        # Estimate what opponent values
         opp_values = self._estimate_opponent_values()
         
-        # Create items list with strategic scoring
+        # Build priority list: prefer items high value to us, low to them
         items = []
         for i in range(len(self.counts)):
             for _ in range(self.counts[i]):
-                # Score: my value minus estimated opponent value
-                # This helps us take items we value more and they value less
                 my_val = self.values[i]
-                opp_val = opp_values[i] * self.total_value / len(self.counts)
-                score = my_val - opp_val * 0.5
-                items.append((score, my_val, i))
+                opp_val = opp_values[i]
+                # Prioritize items valuable to me and cheap for opponent
+                priority = my_val * 2 - opp_val
+                items.append((priority, my_val, i))
         
-        # Sort by strategic score
         items.sort(reverse=True)
         
         # Greedily select items
         offer = [0] * len(self.counts)
         current_value = 0
         
-        for score, my_val, idx in items:
-            offer[idx] += 1
-            current_value += my_val
-            
+        for priority, my_val, idx in items:
             if current_value >= target_value:
                 break
+            offer[idx] += 1
+            current_value += my_val
         
-        # Ensure we ask for something valuable
+        # Ensure we're asking for something reasonable
         if current_value < self.total_value * 0.3:
-            # Fallback: take all items we value
+            # Fallback: take items we value
             offer = [self.counts[i] if self.values[i] > 0 else 0 
                      for i in range(len(self.counts))]
         

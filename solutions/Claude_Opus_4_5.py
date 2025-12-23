@@ -5,36 +5,16 @@ class Agent:
         self.max_rounds = max_rounds
         self.total = sum(c * v for c, v in zip(counts, values))
         self.me = me
-        self.round = 0
+        self.turn = 0
         self.opponent_offers = []
         self.n_items = len(counts)
+        self.total_turns = 2 * max_rounds
         
     def _my_value(self, offer: list[int]) -> int:
         return sum(o * v for o, v in zip(offer, self.values))
     
     def _opponent_gets(self, my_offer: list[int]) -> list[int]:
         return [c - o for c, o in zip(self.counts, my_offer)]
-    
-    def _estimate_opponent_values(self) -> list[float]:
-        """Estimate opponent values based on their offers."""
-        if not self.opponent_offers:
-            # Assume uniform distribution initially
-            total_items = sum(self.counts)
-            return [self.total / total_items] * self.n_items
-        
-        # Opponent wants items they value - look at what they want to keep
-        scores = [0.0] * self.n_items
-        for opp_offer in self.opponent_offers:
-            opp_keeps = self._opponent_gets(opp_offer)
-            for i in range(self.n_items):
-                if self.counts[i] > 0:
-                    scores[i] += opp_keeps[i] / self.counts[i]
-        
-        # Normalize to sum to total
-        total_score = sum(scores)
-        if total_score > 0:
-            return [s / total_score * self.total for s in scores]
-        return [self.total / self.n_items] * self.n_items
     
     def _generate_offers(self) -> list[list[int]]:
         """Generate all possible offers."""
@@ -48,61 +28,71 @@ class Agent:
                 current.pop()
         return list(generate(0, []))
     
-    def _find_best_offer(self, min_value: int, opp_values: list[float]) -> list[int] | None:
-        """Find offer that maximizes opponent value while meeting my minimum."""
+    def _best_offer_for_me(self) -> list[int]:
+        """Get the offer that maximizes my value."""
+        best = None
+        best_val = -1
+        for offer in self._generate_offers():
+            val = self._my_value(offer)
+            if val > best_val:
+                best_val = val
+                best = offer
+        return best if best else self.counts.copy()
+    
+    def _find_offer_with_target(self, min_value: int) -> list[int] | None:
+        """Find offer meeting my minimum that gives opponent most items."""
         best_offer = None
-        best_opp_value = -1
+        best_opp_items = -1
         
         for offer in self._generate_offers():
-            my_val = self._my_value(offer)
-            if my_val >= min_value:
+            if self._my_value(offer) >= min_value:
                 opp_gets = self._opponent_gets(offer)
-                opp_val = sum(o * v for o, v in zip(opp_gets, opp_values))
-                if opp_val > best_opp_value:
-                    best_opp_value = opp_val
+                opp_items = sum(opp_gets)
+                # Prefer giving opponent more items (likely more value for them)
+                if opp_items > best_opp_items:
+                    best_opp_items = opp_items
                     best_offer = offer
-        
         return best_offer
-    
+
     def offer(self, o: list[int] | None) -> list[int] | None:
+        self.turn += 1
         if o is not None:
             self.opponent_offers.append(o)
         
-        # Calculate current round (0-indexed)
-        if self.me == 0:
-            self.round = len(self.opponent_offers)
-        else:
-            self.round = len(self.opponent_offers) - 1 if self.opponent_offers else 0
+        turns_remaining = self.total_turns - self.turn
         
-        turns_left = 2 * self.max_rounds - (2 * self.round + (1 if self.me == 0 else 0))
-        if o is not None:
-            turns_left = 2 * self.max_rounds - len(self.opponent_offers) * 2 + 1
-        
-        # Calculate acceptance threshold based on remaining time
-        progress = 1 - (turns_left / (2 * self.max_rounds))
-        # Start wanting 70% of total, decrease to 35% as we run out of time
-        min_acceptable = self.total * (0.70 - 0.35 * progress)
-        
-        # Check if we should accept
+        # Acceptance logic
         if o is not None:
             my_val = self._my_value(o)
-            # Accept if it meets our threshold or if it's the last round
-            if my_val >= min_acceptable:
+            
+            # Last turn - accept anything positive
+            if turns_remaining == 0:
+                return None if my_val > 0 else self._best_offer_for_me()
+            
+            # Calculate acceptance threshold - be stubborn early, flexible late
+            # Use exponential curve to stay firm longer
+            progress = (self.turn / self.total_turns) ** 2
+            threshold = self.total * (0.75 - 0.45 * progress)
+            
+            # Accept if meets threshold
+            if my_val >= threshold:
                 return None
-            # Accept anything positive on very last turn
-            if turns_left <= 1 and my_val > 0:
+            
+            # Near end, accept if reasonable
+            if turns_remaining <= 2 and my_val >= self.total * 0.3:
                 return None
         
-        # Make a counter-offer
-        opp_values = self._estimate_opponent_values()
+        # Counter-offer logic
+        # Stay aggressive early, concede gradually near deadline
+        if turns_remaining <= 1:
+            target = self.total * 0.3
+        elif turns_remaining <= 3:
+            target = self.total * 0.45
+        else:
+            progress = (self.turn / self.total_turns) ** 1.5
+            target = self.total * (0.80 - 0.35 * progress)
         
-        # Target value decreases as negotiations progress
-        target = self.total * (0.75 - 0.30 * progress)
-        
-        best_offer = self._find_best_offer(target, opp_values)
-        if best_offer is None:
-            best_offer = self._find_best_offer(min_acceptable * 0.9, opp_values)
-        if best_offer is None:
-            best_offer = self._find_best_offer(1, opp_values)
-        
-        return best_offer if best_offer else self.counts.copy()
+        offer = self._find_offer_with_target(target)
+        if offer is None:
+            offer = self._find_offer_with_target(1)
+        return offer if offer else self._best_offer_for_me()

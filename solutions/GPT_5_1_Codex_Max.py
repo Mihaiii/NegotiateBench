@@ -7,27 +7,28 @@ class Agent:
         self.counts = counts
         self.values = values
         self.n = len(counts)
-        self.max_rounds = max_rounds          # how many times WE will be called
-        self.turn = 0                         # how many times offer() has been called
+        self.max_rounds = max_rounds              # how many times we will be called
+        self.turn = 0
         self.total_value = sum(c * v for c, v in zip(counts, values))
-        self.best_seen = -1                   # best offer value seen so far
+        self.best_seen = -1                      # best incoming offer value
         self.idx_asc = sorted(range(self.n), key=lambda i: self.values[i])
         self.idx_desc = list(reversed(self.idx_asc))
 
-        # Precompute manageable offer space
-        self._candidates = None
+        # Precompute candidate offers when feasible
+        self._candidates = None                  # list of tuples (value, offer)
         space = 1
         for c in counts:
             space *= (c + 1)
-            if space > 50000:  # cap enumeration
+            if space > 80000:  # safe cap for enumeration
                 break
-        if space <= 50000 and self.total_value > 0:
+        if space <= 80000 and self.total_value > 0:
             self._candidates = []
             self._enumerate_offers(0, [0] * self.n)
-            # sort by (value desc, items_taken asc to be more conceding)
+            # Sort by (value desc, items taken asc) to be more conceding on ties
             self._candidates.sort(key=lambda x: (-x[0], sum(x[1])))
 
-    def _enumerate_offers(self, idx: int, current: List[int]):
+    # ----------- helpers ----------- #
+    def _enumerate_offers(self, idx: int, current: List[int]) -> None:
         if idx == self.n:
             val = self._value_of(current)
             self._candidates.append((val, current.copy()))
@@ -45,75 +46,92 @@ class Agent:
             return 1.0
         return (self.turn - 1) / (self.max_rounds - 1)
 
-    def _accept_threshold(self) -> float:
-        # Linearly decrease from 0.9 to 0.3 of total value
-        start, end = 0.9, 0.3
-        return self.total_value * (start - (start - end) * self._progress())
+    def _accept_threshold(self, last_turn: bool) -> float:
+        """
+        Linearly drop from ~0.95 to ~0.4 of total value, with a floor around 0.35.
+        On the very last turn, be more willing (down to ~0.25).
+        """
+        if self.total_value == 0:
+            return 0.0
+        start, end = 0.95, 0.40
+        prog = self._progress()
+        th = self.total_value * (start - (start - end) * prog)
+        th = max(th, self.total_value * 0.35)
+        if last_turn:
+            th = min(th, self.total_value * 0.25)
+        return th
 
-    def _choose_offer(self, target: float) -> List[int]:
-        # If we have enumerated candidates, choose a minimally sufficient one
+    def _choose_offer(self, target: float, prog: float) -> List[int]:
+        """
+        Choose an offer with value >= target, conceding more as prog increases.
+        """
         if self._candidates is not None:
+            # Candidates are sorted by value descending.
+            # Build an ascending list of (value, offer) to pick the smallest >= target.
             for val, off in reversed(self._candidates):
-                # reversed because sorted by value desc, so reversed gives low to high
                 if val >= target:
                     return off
-            # otherwise, take the highest value available
+            # If nothing meets target, concede the best remaining (highest value to us)
             return self._candidates[0][1]
 
-        # Fallback greedy builder
+        # Fallback greedy builder if enumeration not available
         offer = self.counts.copy()
-        # Give away zero-value items first
+        # Give away zero-value items
         for i, v in enumerate(self.values):
             if v == 0:
                 offer[i] = 0
-        current = self._value_of(offer)
-        if current < target:
+        current_val = self._value_of(offer)
+
+        # If still below target, take everything
+        if current_val < target:
             offer = self.counts.copy()
-            current = self._value_of(offer)
-        # Remove low-value items while staying above target
+            current_val = self._value_of(offer)
+
+        # Remove low-value items while staying above target (increasing concession with prog)
         for i in self.idx_asc:
             v = self.values[i]
             if v <= 0:
                 continue
-            while offer[i] > 0 and current - v >= target:
+            while offer[i] > 0 and current_val - v >= target:
                 offer[i] -= 1
-                current -= v
-        # If still equal to all, concede one lowest positive if possible
-        if offer == self.counts:
-            for i in self.idx_asc:
-                v = self.values[i]
-                if v > 0 and offer[i] > 0 and current - v >= target:
-                    offer[i] -= 1
-                    break
+                current_val -= v
         return offer
 
+    # ----------- core API ----------- #
     def offer(self, o: Optional[List[int]]) -> Optional[List[int]]:
         self.turn += 1
+        last_turn = (self.turn == self.max_rounds)
 
-        # If we value nothing, accept anything
+        # If we value nothing, accept anything (or take nothing if first)
         if self.total_value == 0:
             return None if o is not None else [0] * self.n
 
+        # Evaluate incoming offer
+        incoming_value = -1
         if o is not None:
-            val = self._value_of(o)
-            if val > self.best_seen:
-                self.best_seen = val
-        else:
-            val = -1
+            incoming_value = self._value_of(o)
+            self.best_seen = max(self.best_seen, incoming_value)
 
-        last_turn = (self.turn == self.max_rounds)
-
-        # Acceptance decision
+        # Decide acceptance
         if o is not None:
-            # Be more willing to accept on the final turn
-            if last_turn and val > 0:
+            accept_th = self._accept_threshold(last_turn)
+            # More willing on last turn or if offer close to best seen
+            if incoming_value >= accept_th:
                 return None
-            # General threshold
-            if val >= self._accept_threshold():
+            if last_turn and incoming_value > 0:
+                return None
+            if self.best_seen > 0 and incoming_value >= self.best_seen * 0.95:
                 return None
 
         # Build counter-offer
-        # Ambition bonus decreases over time
-        ambition_bonus = self.total_value * 0.05 * (1.0 - self._progress())
-        target = max(0, min(self.total_value, self._accept_threshold() + ambition_bonus))
-        return self._choose_offer(target)
+        prog = self._progress()
+        # Ambition bonus shrinks over time
+        ambition_bonus = self.total_value * 0.05 * (1.0 - prog)
+        target = self._accept_threshold(last_turn) + ambition_bonus
+        target = min(self.total_value, max(0, target))
+        counter = self._choose_offer(target, prog)
+
+        # If opponent's last offer equals our counter, accept to finalize
+        if o is not None and counter == o:
+            return None
+        return counter

@@ -9,57 +9,47 @@ class Agent:
         self.opponent_offers = []
         self.n_items = len(counts)
         self.total_turns = 2 * max_rounds
+        self.all_offers = self._generate_all_offers()
+        self.inferred_opp_values = [1] * self.n_items  # Start neutral
         
     def _my_value(self, offer: list[int]) -> int:
         return sum(o * v for o, v in zip(offer, self.values))
     
-    def _opponent_gets(self, my_offer: list[int]) -> list[int]:
-        return [c - o for c, o in zip(self.counts, my_offer)]
-    
-    def _generate_offers(self) -> list[list[int]]:
-        """Generate all possible offers."""
+    def _generate_all_offers(self) -> list[list[int]]:
         def generate(idx, current):
             if idx == self.n_items:
-                yield current.copy()
+                yield tuple(current)
                 return
             for i in range(self.counts[idx] + 1):
                 current.append(i)
                 yield from generate(idx + 1, current)
                 current.pop()
-        return list(generate(0, []))
+        return [list(o) for o in generate(0, [])]
     
-    def _best_offer_for_me(self) -> list[int]:
-        """Get the offer that maximizes my value."""
-        best = None
-        best_val = -1
-        for offer in self._generate_offers():
-            val = self._my_value(offer)
-            if val > best_val:
-                best_val = val
-                best = offer
-        return best if best else self.counts.copy()
-    
-    def _find_offer_with_target(self, min_value: int) -> list[int] | None:
-        """Find offer meeting my minimum that gives opponent most items."""
-        best_offer = None
-        best_opp_items = -1
-        
-        for offer in self._generate_offers():
-            if self._my_value(offer) >= min_value:
-                opp_gets = self._opponent_gets(offer)
-                opp_items = sum(opp_gets)
-                # Prefer giving opponent more items (likely more value for them)
-                if opp_items > best_opp_items:
-                    best_opp_items = opp_items
-                    best_offer = offer
-        return best_offer
+    def _update_opponent_model(self):
+        """Infer opponent values from their offers."""
+        if len(self.opponent_offers) < 2:
+            return
+        # Items opponent consistently keeps likely have high value to them
+        for i in range(self.n_items):
+            opp_keeps = [self.counts[i] - o[i] for o in self.opponent_offers]
+            avg_keep = sum(opp_keeps) / len(opp_keeps)
+            if self.counts[i] > 0:
+                self.inferred_opp_values[i] = avg_keep / self.counts[i] * 10 + 0.1
+
+    def _estimate_opp_value(self, my_offer: list[int]) -> float:
+        """Estimate opponent's value for what they'd get."""
+        return sum((self.counts[i] - my_offer[i]) * self.inferred_opp_values[i] 
+                   for i in range(self.n_items))
 
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn += 1
         if o is not None:
             self.opponent_offers.append(o)
+            self._update_opponent_model()
         
         turns_remaining = self.total_turns - self.turn
+        progress = self.turn / self.total_turns
         
         # Acceptance logic
         if o is not None:
@@ -67,32 +57,39 @@ class Agent:
             
             # Last turn - accept anything positive
             if turns_remaining == 0:
-                return None if my_val > 0 else self._best_offer_for_me()
+                return None if my_val > 0 else self._best_offer()
             
-            # Calculate acceptance threshold - be stubborn early, flexible late
-            # Use exponential curve to stay firm longer
-            progress = (self.turn / self.total_turns) ** 2
-            threshold = self.total * (0.75 - 0.45 * progress)
+            # Dynamic threshold based on progress
+            if turns_remaining <= 2:
+                threshold = self.total * 0.25
+            else:
+                threshold = self.total * (0.6 - 0.35 * progress)
             
-            # Accept if meets threshold
             if my_val >= threshold:
                 return None
-            
-            # Near end, accept if reasonable
-            if turns_remaining <= 2 and my_val >= self.total * 0.3:
-                return None
         
-        # Counter-offer logic
-        # Stay aggressive early, concede gradually near deadline
+        # Generate counter-offer
         if turns_remaining <= 1:
-            target = self.total * 0.3
+            min_val = max(1, self.total * 0.2)
         elif turns_remaining <= 3:
-            target = self.total * 0.45
+            min_val = self.total * 0.35
         else:
-            progress = (self.turn / self.total_turns) ** 1.5
-            target = self.total * (0.80 - 0.35 * progress)
+            min_val = self.total * (0.65 - 0.30 * progress)
         
-        offer = self._find_offer_with_target(target)
-        if offer is None:
-            offer = self._find_offer_with_target(1)
-        return offer if offer else self._best_offer_for_me()
+        # Find offer meeting our minimum that likely appeals to opponent
+        best_offer = None
+        best_score = -float('inf')
+        
+        for offer in self.all_offers:
+            my_val = self._my_value(offer)
+            if my_val >= min_val:
+                opp_val = self._estimate_opp_value(offer)
+                score = opp_val + my_val * 0.1  # Prefer offers opponent might like
+                if score > best_score:
+                    best_score = score
+                    best_offer = offer
+        
+        return best_offer if best_offer else self._best_offer()
+    
+    def _best_offer(self) -> list[int]:
+        return max(self.all_offers, key=self._my_value)

@@ -8,130 +8,156 @@ class Agent:
         self.max_rounds = max_rounds
         self.total_value = sum(c * v for c, v in zip(counts, values))
         
-        # Keep track of offers and counter-offers
-        self.offers_received = []
+        # Track negotiation history
         self.offer_count = 0
-        self.opponent_last_offer = None
+        self.offers_received = []
+        self.offers_made = []
+        self.opponent_pattern = {}  # Track opponent's preferences based on their offers
 
     def calculate_value(self, allocation):
-        """Helper to calculate the value of an allocation based on my values"""
+        """Calculate the value of an allocation based on my values"""
         return sum(a * v for a, v in zip(allocation, self.values))
 
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.offer_count += 1
         
+        turn_num = self.offer_count
+        remaining_turns = self.max_rounds * 2 - turn_num
+        current_round = (turn_num + 1) // 2  # Round number (1-indexed)
+        
         # If received an offer, decide whether to accept it
         if o is not None:
             received_value = self.calculate_value(o)
+            self.offers_received.append((o, received_value))
             
-            # Update opponent's last offer
-            self.opponent_last_offer = o
-            self.offers_received.append(received_value)
+            # Analyze opponent's previous offers to detect pattern
+            self._update_opponent_pattern(o)
             
-            # Remaining rounds (both parties get a turn, so it's rounds * 2 - current number of offers)
-            remaining_offers = self.max_rounds * 2 - self.offer_count
-            
-            # Threshold value decreases as negotiation approaches deadline
-            # Early on: be demanding; late: be more accepting
-            if remaining_offers <= 2:  # Near the end - accept reasonably good offers
-                threshold = self.total_value * 0.5
-            elif remaining_offers <= 4:
-                threshold = self.total_value * 0.6
-            elif remaining_offers <= 8:
-                threshold = self.total_value * 0.7
-            else:
-                threshold = self.total_value * 0.8  # Be demanding at the start
+            # Dynamic acceptance threshold based on remaining turns and negotiation progress
+            threshold = self._calculate_acceptance_threshold(remaining_turns, received_value)
             
             if received_value >= threshold:
-                return None  # Accept the offer
+                # Accept if the offer is good enough
+                return None
 
         # Make a counter-offer
         if o is None:
-            # First offer - be strategic
-            my_offer = self._make_initial_offer()
+            my_offer = self._make_initial_offer(current_round)
         else:
-            # Counter-offer based on previous offers
-            my_offer = self._make_counter_offer(o)
+            my_offer = self._make_counter_offer(o, remaining_turns, current_round)
 
-        # Return my offer
+        # Validate offer is within bounds
+        for i in range(len(my_offer)):
+            my_offer[i] = min(my_offer[i], self.counts[i])
+        
+        self.offers_made.append(my_offer)
         return my_offer
 
-    def _make_initial_offer(self):
-        """Make an initial offer with a fair distribution but tilted in my favor"""
-        # Start with taking all high-value items
+    def _calculate_acceptance_threshold(self, remaining_turns, current_offer_value):
+        """Calculate dynamic acceptance threshold based on remaining time and negotiation progress"""
+        if remaining_turns <= 2:  # Near the end
+            # Be more flexible near deadline
+            return max(self.total_value * 0.3, current_offer_value * 0.9)
+        elif remaining_turns <= 6:
+            # Moderate acceptance: value of offer vs what we expect to get
+            base_threshold = self.total_value * 0.5
+            if self.offers_received:
+                avg_received = sum(v for _, v in self.offers_received[-3:]) / min(len(self.offers_received), 3)
+                base_threshold = max(base_threshold, avg_received * 0.8)
+            return base_threshold
+        else:
+            # Early on: be more demanding
+            base_threshold = self.total_value * 0.7
+            if self.offers_received:
+                recent_high = max(v for _, v in self.offers_received[-3:]) if self.offers_received else 0
+                return max(base_threshold, recent_high * 0.7)
+            return base_threshold
+
+    def _update_opponent_pattern(self, opponent_offer):
+        """Track what items opponent consistently values highly"""
+        if not self.offers_received:
+            for i in range(len(opponent_offer)):
+                self.opponent_pattern[i] = opponent_offer[i]
+        else:
+            # Refine pattern based on multiple offers
+            for i, count in enumerate(opponent_offer):
+                current_pattern_value = self.opponent_pattern.get(i, 0)
+                # Weight newer offers more heavily
+                self.opponent_pattern[i] = max(current_pattern_value, count)
+
+    def _make_initial_offer(self, current_round):
+        """Make initial offer based on my priorities"""
         offer = [0] * len(self.counts)
         
-        # For each item type, decide allocation based on value importance
-        # Allocate most valuable items to me, but be strategic
+        # Prioritize items I value most
         items_by_value = [(i, self.values[i], self.counts[i]) for i in range(len(self.counts))]
         items_by_value.sort(key=lambda x: x[1], reverse=True)  # Sort by value, highest first
         
         for idx, val, count in items_by_value:
             if val > 0:
-                # For high-value items, keep majority but potentially leave some
+                # Take all if it has high value and quantity is small
                 if count == 1:
-                    offer[idx] = count  # Take it if there's only one
+                    offer[idx] = count
                 else:
-                    offer[idx] = max(math.ceil(count * 0.6), 1)  # Keep 60% or at least 1
+                    # Take majority but leave some if there are multiple
+                    offer[idx] = max(count - 1, count // 2 + 1)  # Keep more than half but not all
             else:
-                offer[idx] = 0  # Don't need items with 0 value
-        
-        # Make sure we don't offer more than what's available
-        for idx in range(len(offer)):
-            offer[idx] = min(offer[idx], self.counts[idx])
-            
+                offer[idx] = 0  # Skip worthless items for me
+                
         return offer
 
-    def _make_counter_offer(self, prev_opponent_offer):
-        """Make a counter-offer based on my preferences and the opponent's offer"""
-        # Start with my initial strategy
+    def _make_counter_offer(self, prev_opponent_offer, remaining_turns, current_round):
+        """Make a strategic counter-offer"""
         counter = [0] * len(self.counts)
         
-        # Calculate the opponent's remaining allocation from the prev_opponent's offer to me
+        # Determine opponent's allocation from their offer to me
         opp_allocation = [self.counts[i] - prev_opponent_offer[i] for i in range(len(self.counts))]
         
-        # For each item type, consider what the opponent prioritizes vs. what I want
-        # Use this to find a compromise that satisfies me but gives opponent something they might want
+        # Create counter-offer based on my preferences but responsive to opponent
+        sorted_items = []
+        for i in range(len(self.counts)):
+            my_val = self.values[i]
+            opp_preference = self.counts[i] - opp_allocation[i]  # What opponent got
+            sorted_items.append((i, my_val, self.counts[i], opp_preference))
         
-        # Sort items by my value
-        items_by_my_value = [(i, self.values[i], self.counts[i]) for i in range(len(self.counts))]
-        items_by_my_value.sort(key=lambda x: x[1], reverse=True)
+        # Sort primarily by my value, secondarily to consider opponent's interest
+        sorted_items.sort(key=lambda x: (x[1], -x[3]), reverse=True)
         
-        # Calculate value from the previous offer
-        prev_offer_value = self.calculate_value(prev_opponent_offer)
+        my_total_value = 0
         
-        # Base counter-offer on what I want, being flexible with items I value less
-        for idx, my_val, count in items_by_my_value:
+        for idx, my_val, count, opp_requested in sorted_items:
             if my_val > 0:
-                # Take as much as possible of high-value items
-                counter[idx] = count
+                if count == 1:
+                    # Only one item - take it if it's valuable
+                    counter[idx] = 1
+                else:
+                    # Multiple items: try to balance keeping valuable but not being too greedy
+                    if remaining_turns <= 4:  # Near deadline, be more flexible
+                        needed_for_good_deal = max(1, count // 2)
+                        if my_val >= self.total_value * 0.1:  # High value item, keep most
+                            counter[idx] = max(needed_for_good_deal, count - opp_requested)
+                        else:
+                            # Lower value but still worth taking some
+                            counter[idx] = max(0, count - (opp_requested + 1) // 2)
+                    else:
+                        # Early/middle game: take majority
+                        counter[idx] = max(count // 2 + 1, 1)
             else:
-                # For zero-value items, consider opponent's perspective
-                # If opponent wants it a lot in their offer to me, maybe they value it highly
-                opp_gets_from_prev = self.counts[idx] - prev_opponent_offer[idx]  # What opponent gets in their proposed split
-                counter[idx] = 0  # Let opponent keep items I don't value
-                
-        # Ensure we don't exceed counts
+                # No value to me: consider leaving more of these for opponent
+                # But also consider if the opponent is being uncooperative overall
+                if remaining_turns <= 6:
+                    # Deadline approaching - make offer more palatable
+                    counter[idx] = max(0, count // 2)  # Offer compromise
+                else:
+                    counter[idx] = 0  # Give to opponent if worthless to me
+                            
+            counter[idx] = min(counter[idx], count)  # Don't exceed count
+            counter[idx] = max(0, counter[idx])      # Don't give negative
+            
+            my_total_value += counter[idx] * my_val
+        
+        # Ensure we don't exceed available counts
         for i in range(len(counter)):
-            counter[i] = min(counter[i], self.counts[i])
+            counter[i] = min(max(0, counter[i]), self.counts[i])
             
-        # Adjust based on stage in the game and if opponent seems willing to compromise
-        remaining_offers = self.max_rounds * 2 - self.offer_count
-        
-        if remaining_offers <= 4:
-            # Near the end, be more willing to compromise toward a deal
-            # Try to find an offer that might be acceptable to both parties
-            best_offer = counter[:]
-            
-            for i in range(len(self.counts)):
-                if self.values[i] == 0:
-                    # Consider leaving some of valueless items to make offer more palatable
-                    if opp_allocation[i] > 0 and count > 1:
-                        best_offer[i] = max(0, count // 2)  # Offer compromise
-            
-            # Make sure the offer is still acceptable to me
-            if self.calculate_value(best_offer) >= ((prev_offer_value + self.total_value) / 2) * 0.5 \
-               or self.calculate_value(best_offer) >= self.total_value * 0.6:
-                counter = best_offer
-        
         return counter

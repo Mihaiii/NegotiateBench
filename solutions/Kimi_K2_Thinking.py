@@ -1,5 +1,4 @@
-import math
-from typing import List
+from typing import List, Optional
 
 class Agent:
     def __init__(self, me: int, counts: List[int], values: List[int], max_rounds: int):
@@ -7,74 +6,136 @@ class Agent:
         self.counts = counts
         self.values = values
         self.max_rounds = max_rounds
+        self.total_offers = max_rounds * 2
         self.total_value = sum(c * v for c, v in zip(counts, values))
         self.n = len(counts)
         self.opponent_offer_history: List[List[int]] = []
         self.turn_counter = 0
-        self.total_offers = max_rounds * 2
-        # Aim for 50% of total value at the start, decreasing to 0 by the end.
-        self.target_us_factor = 0.5
+        # Tunable parameters
+        self.start_target_frac = 0.7  # start by aiming for 70 % of our total value
 
-    def offer(self, o: List[int] | None) -> List[int] | None:
-        # count this turn
+    def offer(self, o: Optional[List[int]]) -> Optional[List[int]]:
         self.turn_counter += 1
-        # progress from 0 (start) to 1 (end)
         progress = self.turn_counter / self.total_offers if self.total_offers > 0 else 0.0
-        # value we aim for in this round (linearly decreasing)
-        target_us = int(self.total_value * self.target_us_factor * (1 - progress))
 
-        # If we are the last mover on the final turn, accepting any offer is better than a sure zero.
-        if self.me == 1 and self.turn_counter == self.total_offers:
-            if o is not None:
-                return None  # accept
-
-        # ----- acceptance decision -----
+        # Record opponent's last proposal (what they would give us)
         if o is not None:
-            offered_value = sum(o[i] * self.values[i] for i in range(self.n))
-            if offered_value >= target_us:
-                return None  # accept the opponent's offer
-
-            # store opponent's offer for later estimation
             self.opponent_offer_history.append(o)
 
-        # ----- estimate opponent's valuations -----
-        # default neutral prior (0.5 means ``indifferent'')
-        avg_ratio = [0.5] * self.n
-        if self.opponent_offer_history:
-            for i in range(self.n):
-                total_offered = sum(off[i] for off in self.opponent_offer_history)
-                avg_ratio[i] = total_offered / len(self.opponent_offer_history) / self.counts[i]
+        # ---------- Compute our current targets ----------
+        # Desired value for ourselves (declines linearly from start_target_frac to 0)
+        target_us = int(self.total_value * self.start_target_frac * (1 - progress))
+        if target_us < 0:
+            target_us = 0
 
-        # weight_i = 1 - avg_ratio (higher means opponent cares more about the item)
-        weight = [1 - avg_ratio[i] for i in range(self.n)]
+        # Minimal value we guess the opponent will accept (grows linearly from 0 to total)
+        target_opp = int(self.total_value * progress)
+        if target_opp < 0:
+            target_opp = 0
 
-        # scaling factor so that opponent's total estimated value equals our total value
-        total_weighted_counts = sum(self.counts[i] * weight[i] for i in range(self.n))
-        scaling = self.total_value / total_weighted_counts if total_weighted_counts > 0 else 0.0
-        opp_val_per_item = [weight[i] * scaling for i in range(self.n)]
+        # ---------- Estimate opponent's per‑type valuation ----------
+        n_hist = len(self.opponent_offer_history)
 
-        # ----- build an offer that is good for us and palatable to opponent -----
-        eps = 1e-9
-        ratio = [self.values[i] / (opp_val_per_item[i] + eps) for i in range(self.n)]
+        # Laplace smoothing: prior of one “give” and one “no‑give”
+        avg_give = []
+        for i in range(self.n):
+            total_offered_i = sum(off[i] for off in self.opponent_offer_history)
+            # (total_offered_i + 1) / (n_hist + 2)
+            avg = (total_offered_i + 1) / (n_hist + 2) if self.total_value > 0 else 0.5
+            avg_give.append(avg)
 
-        # sort types by decreasing ratio (we prefer to keep items with high ratio)
-        sorted_idx = sorted(range(self.n), key=lambda i: ratio[i], reverse=True)
+        # weight_i = 1 - avg_give_i (higher weight → opponent cares more about the item)
+        weight = [1 - avg_give[i] for i in range(self.n)]
 
-        our_offer = [0] * self.n
-        remaining_target = target_us
+        # Scale weights so that the opponent’s total estimated value equals our total value
+        denom = sum(weight[i] * self.counts[i] for i in range(self.n))
+        scaling = self.total_value / denom if denom > 0 else 0.0
+        opp_values = [int(round(weight[i] * scaling)) for i in range(self.n)]
 
-        for i in sorted_idx:
-            if self.values[i] == 0:
-                # we are indifferent; keep none for ourselves
-                continue
-            if remaining_target <= 0:
-                # we already meet our own target
-                break
-            # how many of this type we need to take (at least one if we still need value)
-            need_items = max(1, int(math.ceil(remaining_target / self.values[i])))
-            take = min(self.counts[i], need_items)
-            our_offer[i] = take
-            remaining_target -= take * self.values[i]
+        # ---------- Acceptance decision ----------
+        if o is not None:
+            # Value we would obtain by accepting the opponent's proposal
+            offered_value = sum(o[i] * self.values[i] for i in range(self.n))
 
-        # If we still have a positive remaining_target we simply cannot reach it; we return the best we can do.
-        return our_offer
+            # Our acceptance threshold softens as the deadline approaches
+            accept_factor = 1.0 - progress * 0.5  # from 1 down to 0.5
+            min_accept = int(target_us * accept_factor)
+            if min_accept < 0:
+                min_accept = 0
+
+            if offered_value >= min_accept:
+                return None  # accept
+
+            # If we are the last mover on the final turn, accept anything rather than get zero
+            if self.me == 1 and self.turn_counter == self.total_offers:
+                return None
+
+        # ---------- Build our counter‑offer ----------
+        allocation = self._compute_offer(opp_values, target_opp)
+        return allocation
+
+    def _compute_offer(self, opp_values: List[int], target_opp: int) -> List[int]:
+        """
+        Solve a bi‑criteria knapsack: maximize our value subject to the opponent receiving
+        at least target_opp.  The problem is tiny (≤10 types, ≤10 copies each),
+        so a DP over opponent value is feasible.
+        """
+        n = self.n
+        counts = self.counts
+        values = self.values
+
+        # dp[i][o] = maximum our value reachable after processing the first i types
+        # and achieving exactly opponent value o.
+        dp = [dict() for _ in range(n + 1)]
+        pred = [dict() for _ in range(n + 1)]
+
+        dp[0][0] = 0
+        pred[0][0] = None
+
+        for i in range(n):
+            dp[i + 1] = {}
+            pred[i + 1] = {}
+            c = counts[i]
+            v = values[i]
+            ov = opp_values[i]
+
+            # Reduce the branch factor for types that are worthless to one side
+            if ov == 0:
+                # opponent does not value this type – keep everything for ourselves
+                ks = [c]
+            elif v == 0:
+                # we do not value this type – give everything to opponent
+                ks = [0]
+            else:
+                ks = range(c + 1)
+
+            for o_prev, u_prev in dp[i].items():
+                for k in ks:
+                    new_o = o_prev + (c - k) * ov
+                    new_u = u_prev + k * v
+                    # keep the best (max our value) for this opponent value
+                    if new_o not in dp[i + 1] or new_u > dp[i + 1][new_o]:
+                        dp[i + 1][new_o] = new_u
+                        pred[i + 1][new_o] = (o_prev, k)
+
+        # Select the best final state: opponent value >= target_opp and our value maximal
+        best_o = None
+        best_u = -1
+        for o_final, u_final in dp[n].items():
+            if o_final >= target_opp and u_final > best_u:
+                best_o = o_final
+                best_u = u_final
+
+        # If no state reaches the opponent's target, fall back to the state with maximum our value
+        if best_o is None:
+            best_o, best_u = max(dp[n].items(), key=lambda item: item[1])
+
+        # Reconstruct the allocation that leads to the chosen state
+        alloc = [0] * n
+        cur_o = best_o
+        for i in range(n, 0, -1):
+            prev_o, k = pred[i][cur_o]
+            alloc[i - 1] = k
+            cur_o = prev_o
+
+        return alloc

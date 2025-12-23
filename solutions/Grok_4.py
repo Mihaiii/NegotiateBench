@@ -16,7 +16,11 @@ class Agent:
 
     def estimate_v_partner(self) -> list[float]:
         if not self.partner_offers:
-            return self.values.copy()
+            total_items = sum(self.counts)
+            if total_items == 0:
+                return [0.0] * self.n_types
+            unit = self.total / total_items
+            return [unit] * self.n_types
         num_off = len(self.partner_offers)
         avg_taken = [0.0] * self.n_types
         for o in self.partner_offers:
@@ -57,7 +61,7 @@ class Agent:
             max_unit = max((v_partner[i] for i in range(self.n_types) if self.counts[i] > 0), default=0)
             partner_threshold = max_unit * 0.1 if max_unit > 0 else 0
         else:
-            my_share_frac = 0.5 + 0.4 * (1 - progress)
+            my_share_frac = 0.5 + 0.3 * (1 - progress)
             min_accept = self.total * my_share_frac
             partner_threshold = self.total * (1 - my_share_frac)
         if o is not None:
@@ -72,14 +76,14 @@ class Agent:
         m = [0] * self.n_types
         current_util = 0.0
         for i in range(self.n_types):
-            if self.values[i] == 0 and v_partner[i] > 0:
+            if self.values[i] == 0:
                 m[i] = self.counts[i]
                 current_util += m[i] * v_partner[i]
         remaining_needed = partner_threshold - current_util
         if remaining_needed > 0:
             candidates = [i for i in range(self.n_types) if self.values[i] > 0 and v_partner[i] > 0 and m[i] < self.counts[i]]
             if candidates:
-                candidates.sort(key=lambda i: v_partner[i] / self.values[i], reverse=True)
+                candidates.sort(key=lambda i: (-v_partner[i] / self.values[i], self.values[i]))
                 for i in candidates:
                     util_per = v_partner[i]
                     max_give = self.counts[i] - m[i]

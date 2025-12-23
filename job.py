@@ -13,7 +13,7 @@ from misc.io import (
     get_code_example,
     save_solution,
 )
-from db.service import save_battle_results, save_battle_samples, get_samples
+from db.service import save_battle_results, save_battle_samples, get_samples, get_leaderboard_rank_and_model_latest_session
 
 # Load environment variables from .env file
 load_dotenv()
@@ -30,6 +30,8 @@ def build_user_prompt(
     current_code: str | None = None,
     error: str | None = None,
     samples_data: list | None = None,
+    loaderboard_data: list | None = None,
+    display_name: str | None = None,
 ) -> str:
     """Build the user prompt, optionally including current code, error, and samples."""
     user_prompt_template = prompts.get("user_prompt", "")
@@ -41,6 +43,17 @@ def build_user_prompt(
         )
     else:
         current_code_section = ""
+
+    rank = next((entry.get("rank") for entry in loaderboard_data if entry.get("model_name") == display_name), None) if loaderboard_data and display_name else None
+    if loaderboard_data and rank is not None:
+        loaderboard_section_template = prompts.get("loaderboard_section", "")
+        loaderboard_section = loaderboard_section_template.format(
+            loaderboard_data=json.dumps(loaderboard_data, indent=2),
+            rank=rank,
+            total_models=len(loaderboard_data),
+        )
+    else:
+        loaderboard_section = ""
 
     if error:
         error_section_template = prompts.get("error_section", "")
@@ -60,6 +73,7 @@ def build_user_prompt(
         current_code_section=current_code_section,
         error_section=error_section,
         samples=samples,
+        loaderboard_section=loaderboard_section,
     )
 
 
@@ -104,6 +118,7 @@ def main():
     commit_hash = git.get_newest_commit_in_solutions()
     # Get samples from the database for this commit
     samples = get_samples(commit_hash)
+    loaderboard_data = get_leaderboard_rank_and_model_latest_session()
     print(f"Retrieved {len(samples)} samples from database for commit {commit_hash}")
 
     # Load models from config
@@ -141,7 +156,7 @@ def main():
             or s.get("opponent_model_name") == display_name
         ]
 
-        new_code = get_algos(display_name, openrouter_name, current_code, model_samples)
+        new_code = get_algos(display_name, openrouter_name, current_code, model_samples, loaderboard_data)
         if not new_code:
             models.remove(model)
             continue
@@ -210,7 +225,7 @@ def main():
     save_battle_results(battle_results, max_possible_profit, new_commit_hash)
 
 
-def get_algos(display_name, openrouter_name, current_code, samples):
+def get_algos(display_name, openrouter_name, current_code, samples, loaderboard_data):
 
     prompts = load_prompts()
     system_prompt_template = prompts.get("system_prompt", "")
@@ -227,7 +242,7 @@ def get_algos(display_name, openrouter_name, current_code, samples):
         print(f"Attempt {attempt + 1}/{max_attempts}")
 
         # Build user prompt with current code, error, and samples (if any)
-        user_prompt = build_user_prompt(prompts, current_code, error, samples)
+        user_prompt = build_user_prompt(prompts, current_code, error, samples, loaderboard_data, display_name)
 
         print("=" * 20)
         print(f"{display_name}: {system_prompt=}")

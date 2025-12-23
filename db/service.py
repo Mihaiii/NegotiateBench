@@ -45,6 +45,40 @@ def get_top_model_latest_session():
     return top_model
 
 
+def get_leaderboard_rank_and_model_latest_session():
+    """
+    Get rank and model_name from negotiations_leaderboard_latest.
+    Returns a list of dictionaries with rank and model_name.
+    """
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL environment variable must be set")
+
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            SELECT rank, model_name
+            FROM negotiations_leaderboard_latest
+            ORDER BY rank;
+            """
+        )
+        rows = cursor.fetchall()
+        results = [
+            {
+                "rank": row[0],
+                "model_name": row[1],
+            }
+            for row in rows
+        ]
+    finally:
+        cursor.close()
+        conn.close()
+
+    return results
+
+
 def get_samples(commit_hash):
     """
     Get all session_samples records filtered by commit_hash.

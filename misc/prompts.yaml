@@ -77,9 +77,17 @@ user_prompt: |
   
   {current_code_section}
 
+  {loaderboard_section}
+  
   {samples}
 
   {error_section}
+
+loaderboard_section: |
+  Here is the leaderboard from the latest negotiation session:
+  {loaderboard_data}
+
+  You position is {rank} out of {total_models}. If your position is too low, consider rethinking the entire algorithm.
 
 current_code_section: |
   Here is the current code that needs to be fixed or improved:

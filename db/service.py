@@ -260,10 +260,10 @@ def save_battle_samples(battle_scenarios: list, commit_hash: str):
 
     Args:
         battle_scenarios: List of scenario dictionaries. Each scenario contains:
-            - 'scenario': the original scenario data with '{model_name}_values' keys
+            - 'scenario': the original scenario data with '{model_name} values' keys
             - 'outcome': 'deal', 'no_deal', or error type
-            - '{model_x}_profit': profit achieved by model_x
-            - '{model_y}_profit': profit achieved by model_y
+            - '{model_x} profit': profit achieved by model_x
+            - '{model_y} profit': profit achieved by model_y
             - 'turn_history': list of offers per round with '{model_name} offer' keys
         commit_hash: The git commit hash
     """
@@ -274,18 +274,18 @@ def save_battle_samples(battle_scenarios: list, commit_hash: str):
 
     records = []
     for scenario_info in battle_scenarios:
-        profit_keys = [k for k in scenario_info.keys() if k.endswith("_profit")]
+        profit_keys = [k for k in scenario_info.keys() if k.endswith(" profit")]
         if len(profit_keys) != 2:
             continue
         
-        model_x = profit_keys[0].replace("_profit", "")
-        model_y = profit_keys[1].replace("_profit", "")
+        model_x = profit_keys[0].replace(" profit", "")
+        model_y = profit_keys[1].replace(" profit", "")
         
         data = {
             "scenario": scenario_info["scenario"],
             "outcome": scenario_info["outcome"],
-            f"{model_x}_profit": scenario_info[f"{model_x}_profit"],
-            f"{model_y}_profit": scenario_info[f"{model_y}_profit"],
+            f"{model_x} profit": scenario_info[f"{model_x} profit"],
+            f"{model_y} profit": scenario_info[f"{model_y} profit"],
             "turn_history": scenario_info["turn_history"],
         }
         data_json = json.dumps(data)

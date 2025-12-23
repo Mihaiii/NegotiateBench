@@ -280,8 +280,8 @@ def run_battles(
             model_X is agent_0 and the rest where model_X is agent_1. Each scenario contains:
             - 'scenario': the original scenario data
             - 'outcome': 'deal', 'no_deal', or error type
-            - '{model_x}_profit': profit achieved by model_x
-            - '{model_y}_profit': profit achieved by model_y
+            - '{model_x} profit': profit achieved by model_x
+            - '{model_y} profit': profit achieved by model_y
             - 'turn_history': list of offers per round with '{model_name} offer' keys
     """
     # Get num_samples from environment variable if available
@@ -398,15 +398,15 @@ def run_battles(
                         scenario_with_names = {
                             "counts": scenario["counts"],
                             "rounds": scenario["rounds"],
-                            f"{display_name_0}_values": scenario["player_0"],
-                            f"{display_name_1}_values": scenario["player_1"],
+                            f"{display_name_0} values": scenario["player_0"],
+                            f"{display_name_1} values": scenario["player_1"],
                         }
                         battle_scenarios[canonical_key].append(
                             {
                                 "scenario": scenario_with_names,
                                 "outcome": outcome,
-                                f"{display_name_0}_profit": profit_0,
-                                f"{display_name_1}_profit": profit_1,
+                                f"{display_name_0} profit": profit_0,
+                                f"{display_name_1} profit": profit_1,
                                 "turn_history": turn_history,
                             }
                         )

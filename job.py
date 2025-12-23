@@ -210,7 +210,7 @@ def main():
             for scenario_dict in scenario_list:
                 scenario = scenario_dict.get("scenario", {})
                 # Check for winner in either player's values
-                player_keys = [k for k in scenario.keys() if k.endswith("_values")]
+                player_keys = [k for k in scenario.keys() if k.endswith(" values")]
                 if any(winner_name in k for k in player_keys):
                     winner_scenarios.append(scenario_dict)
 

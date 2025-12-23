@@ -24,7 +24,7 @@ class Agent:
         num_off = len(self.partner_offers)
         avg_taken = [0.0] * self.n_types
         sum_weights = 0.0
-        alpha = 0.8
+        alpha = 0.9
         for k in range(num_off):
             weight = alpha ** (num_off - 1 - k)
             o = self.partner_offers[k]
@@ -59,19 +59,16 @@ class Agent:
         progress = current_turn / self.max_turns if self.max_turns > 0 else 1.0
         v_partner = self.estimate_v_partner()
         if is_last_turn:
-            if o is None:
-                min_accept = 0
-            else:
-                min_accept = 0.001
+            min_accept = 0
             partner_threshold = self.total / 2
         elif is_penultimate:
             min_accept = self.total / 2
             max_unit = max((v_partner[i] for i in range(self.n_types) if self.counts[i] > 0), default=0)
             partner_threshold = max_unit * 0.1 if max_unit > 0 else 0
         else:
-            power = 5
+            power = 10
             f = 1 - progress ** power
-            my_share_frac = 0.5 + 0.45 * f
+            my_share_frac = 0.5 + 0.5 * f
             min_accept = self.total * my_share_frac
             partner_threshold = self.total * (1 - my_share_frac)
         if o is not None:

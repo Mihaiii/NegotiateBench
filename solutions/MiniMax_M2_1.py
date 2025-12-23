@@ -6,43 +6,64 @@ class Agent:
         self.total = sum(counts[i] * values[i] for i in range(len(counts)))
         self.total_turns = 2 * max_rounds
         self.turns = 0
-        self.current_demand = counts[:]  # Start demanding everything
-
+        self.min_acceptable = self.total * 0.35  # Accept at least 35% of total value
+        self.best_offer = None
+        self.best_offer_value = 0
+        self.offered_items = counts[:]  # Track what we initially demand
+        
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turns += 1
-        remaining_turns = self.total_turns - self.turns + 1
-        half = self.total / 2
+        remaining_turns = self.total_turns - self.turns
         
-        # Calculate target value for this turn (interpolating from total to half)
-        if self.total_turns > 1:
-            target_value = half + (self.total - half) * ((remaining_turns - 1) / (self.total_turns - 1))
-        else:
-            target_value = half
-
-        # Check if we accept the partner's offer
+        # If partner made an offer, evaluate it
         if o is not None:
             offered_value = sum(o[i] * self.values[i] for i in range(len(o)))
-            if offered_value >= target_value:
-                return None  # Accept
-
-        # Adjust our demand by removing objects until value <= target_value
-        while True:
-            current_value = sum(self.current_demand[i] * self.values[i] for i in range(len(self.current_demand)))
-            if current_value <= target_value:
-                break
             
-            # Find object type with smallest value per unit that we still have
-            min_index = -1
-            min_value = float('inf')
-            for i in range(len(self.current_demand)):
-                if self.current_demand[i] > 0 and self.values[i] < min_value:
-                    min_value = self.values[i]
-                    min_index = i
+            # Track best offer received
+            if offered_value > self.best_offer_value:
+                self.best_offer = o[:]
+                self.best_offer_value = offered_value
             
-            if min_index == -1:
-                break  # No more objects to remove
+            # Accept if it's good enough
+            if offered_value >= self.min_acceptable:
+                return None
             
-            # Remove one object of the least valued type
-            self.current_demand[min_index] -= 1
+            # Calculate our fallback demand based on remaining time
+            concession_rate = remaining_turns / self.total_turns
+            target_value = self.min_acceptable + (self.total - self.min_acceptable) * concession_rate
+            
+            # Build a strategic counter-offer
+            counter = [0] * len(self.counts)
+            remaining_items = self.counts[:]
+            
+            # First, try to get items we value most that partner might not want
+            # Sort items by value ratio (high value to us, hopefully low to partner)
+            item_indices = list(range(len(self.counts)))
+            item_indices.sort(key=lambda i: -self.values[i])
+            
+            for i in item_indices:
+                if self.values[i] > 0 and remaining_items[i] > 0:
+                    # Calculate how much value this item gives us
+                    item_value = self.values[i]
+                    
+                    # If we still need more value, take this item
+                    if sum(counter[j] * self.values[j] for j in range(len(counter))) < target_value:
+                        counter[i] = 1
+                        remaining_items[i] -= 1
+            
+            # If we haven't reached target value, add more items
+            for i in item_indices:
+                while remaining_items[i] > 0 and sum(counter[j] * self.values[j] for j in range(len(counter))) < target_value:
+                    counter[i] += 1
+                    remaining_items[i] -= 1
+            
+            return counter
         
-        return self.current_demand
+        # First turn or no offer to respond to
+        # Make initial demand: ask for everything we value
+        initial_demand = [0] * len(self.counts)
+        for i in range(len(self.counts)):
+            if self.values[i] > 0:
+                initial_demand[i] = self.counts[i]
+        
+        return initial_demand

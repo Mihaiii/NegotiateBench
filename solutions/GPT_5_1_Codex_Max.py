@@ -3,11 +3,12 @@ from typing import List, Optional
 
 class Agent:
     """
-    Negotiation agent:
-    - Enumerates feasible splits when possible, otherwise uses a greedy fallback.
-    - Starts ambitious, concedes smoothly; accepts decent offers earlier if already good.
-    - Tries to hand over items it likely values less / opponent values more.
-    - Avoids ending with no-deal (accepts on last word when second).
+    Negotiation agent that:
+    - Searches all feasible splits when the space is small; otherwise uses a greedy fallback.
+    - Starts ambitious and concedes smoothly, with extra concession if the opponent stalls.
+    - Learns a crude preference estimate for the opponent from their offers and prefers
+      offers that look attractive to them while keeping high value for us.
+    - Accepts good offers early and avoids no‑deal on the last word when acting second.
     """
 
     def __init__(self, me: int, counts: List[int], values: List[int], max_rounds: int):
@@ -16,36 +17,35 @@ class Agent:
         self.values = values
         self.n = len(counts)
         self.max_rounds = max_rounds
-        self.turn = 0  # how many times we've been called
+        self.turn = 0  # how many times we've been called (our turns only)
         self.total_value = sum(c * v for c, v in zip(counts, values))
         self.best_seen = -1
         self.last_offer_made: Optional[List[int]] = None
+        self.last_offer_from_them: Optional[List[int]] = None
+        self.stall = 0
 
-        self.max_val = max(values) if values else 0
-
-        # Opponent preference heuristic (updated from their offers)
-        # Initialized inversely proportional to our value (items we value less are probably
-        # more valuable to them).
-        base = self.max_val + 1
+        max_val = max(values) if values else 0
+        base = max_val + 1
+        # Initial guess: they like what we like less
         self.opp_pref = [base - v for v in values]
 
-        # Precompute all feasible offers if the search space is manageable
-        self.candidates = None  # list of tuples (my_val, opp_score, offer)
+        # Pre-enumerate candidates if feasible
+        self.candidates = None  # list of (my_val, opp_score, offer)
         space = 1
         for c in counts:
             space *= (c + 1)
-            if space > 300_000:  # modest cap for speed
+            if space > 300_000:
                 break
         if space <= 300_000 and self.total_value > 0:
             self.candidates = []
             self._enumerate(0, [0] * self.n)
-            # Sort by my value desc, opp_score desc
+            # Sort: my value desc, opponent score desc
             self.candidates.sort(key=lambda x: (-x[0], -x[1]))
 
-        # Greedy concession order: ascending by my value
+        # Greedy removal order: give away cheapest to us first
         self.idx_asc = sorted(range(self.n), key=lambda i: self.values[i])
 
-    # ----------------- helpers -----------------
+    # ---------------- helpers ----------------
     def _enumerate(self, idx: int, cur: List[int]) -> None:
         if idx == self.n:
             my_val = self._value_of(cur)
@@ -61,7 +61,7 @@ class Agent:
         return sum(v * o for v, o in zip(self.values, offer))
 
     def _opp_score(self, offer: List[int]) -> int:
-        """Heuristic attractiveness to opponent: what we give them weighted by opp_pref."""
+        """Heuristic: how attractive to opponent (what we give them, weighted)."""
         score = 0
         for i in range(self.n):
             give = self.counts[i] - offer[i]
@@ -71,29 +71,21 @@ class Agent:
     def _progress(self) -> float:
         if self.max_rounds <= 1:
             return 1.0
-        # turn starts at 0; use (turn - 1)/(max_rounds - 1) after increment
         return max(0.0, min(1.0, (self.turn - 1) / (self.max_rounds - 1)))
 
     def _accept_threshold(self, last_turn: bool) -> float:
-        """
-        Linear drop from ~0.90 to ~0.45 of total. Extra softness near the end.
-        """
+        """Linear drop from ~0.85 to ~0.45 of total, with a floor."""
         if self.total_value == 0:
             return 0.0
-        start, end = 0.90, 0.45
+        start, end = 0.85, 0.45
         prog = self._progress()
         th = self.total_value * (start - (start - end) * prog)
         floor = 0.30 if last_turn else 0.35
         return max(th, self.total_value * floor)
 
     def _select_offer(self, target: float) -> List[int]:
-        """
-        Choose an offer with value >= target if possible, otherwise highest-value offer.
-        Prefer offers attractive to opponent.
-        """
+        """Pick an offer >= target if possible, else best available; prefer opp-attractive."""
         if self.candidates:
-            # Because candidates sorted by my_val desc then opp_score desc,
-            # find first meeting target; otherwise best overall
             chosen = None
             for my_val, _, off in self.candidates:
                 if my_val >= target:
@@ -103,9 +95,8 @@ class Agent:
                 chosen = self.candidates[0][2]
             return chosen.copy()
 
-        # Fallback greedy: start with all, remove low-value items while staying >= target
+        # Greedy fallback: start with everything, give away low-value items while >= target
         offer = self.counts.copy()
-        # Give away items we value at 0 immediately
         for i, v in enumerate(self.values):
             if v == 0:
                 offer[i] = 0
@@ -120,21 +111,18 @@ class Agent:
         return offer
 
     def _update_opp_pref_from_offer(self, o: List[int]) -> None:
-        """
-        Update heuristic preference based on what opponent kept for themselves.
-        The more they keep of an item, the more we think they value it.
-        """
+        """Update heuristic based on what they keep."""
         for i in range(self.n):
-            them_take = self.counts[i] - o[i]
-            # Increment modestly to avoid runaway scaling
-            self.opp_pref[i] += them_take
+            keep = self.counts[i] - o[i]
+            if keep > 0:
+                self.opp_pref[i] += keep
 
-    # ----------------- core API -----------------
+    # ---------------- core API ----------------
     def offer(self, o: Optional[List[int]]) -> Optional[List[int]]:
         self.turn += 1
         last_turn = (self.turn == self.max_rounds)
 
-        # If we value nothing, accept anything or ask for nothing if starting
+        # If nothing is valuable to us, accept anything / ask nothing
         if self.total_value == 0:
             return None if o is not None else [0] * self.n
 
@@ -142,38 +130,41 @@ class Agent:
         if o is not None:
             incoming_val = self._value_of(o)
             self.best_seen = max(self.best_seen, incoming_val)
-            # Learn about opponent preferences
             self._update_opp_pref_from_offer(o)
+            if self.last_offer_from_them is not None and o == self.last_offer_from_them:
+                self.stall += 1
+            else:
+                self.stall = 0
+            self.last_offer_from_them = o.copy()
 
-        # If we are second and it's our last turn, we cannot counter (avoid no-deal)
+        # If we are second and it's our last turn, accept anything positive to avoid no-deal
         if o is not None and last_turn and self.me == 1:
             return None
 
-        # Decide on acceptance
+        # Acceptance logic
         if o is not None:
-            # If opponent matches our previous offer, accept
             if self.last_offer_made is not None and o == self.last_offer_made:
                 return None
-
             accept_th = self._accept_threshold(last_turn)
-            # Accept if meets threshold
+            prog = self._progress()
+            # Slightly softer near the end
+            soft = accept_th * (0.9 if prog > 0.6 else 1.0)
             if incoming_val >= accept_th:
                 return None
-            # Accept if clearly the best we've seen and not terrible
-            if incoming_val >= max(self.best_seen, self.total_value * 0.5):
+            if prog > 0.5 and incoming_val >= max(self.best_seen, self.total_value * 0.55):
                 return None
-            # Near the end, accept reasonable positive offers
+            if incoming_val >= soft and self.stall > 1:
+                return None
             if last_turn and incoming_val > 0:
-                return None
-            if self.turn >= self.max_rounds - 1 and incoming_val >= max(self.best_seen, accept_th * 0.8):
                 return None
 
         # Build counter-offer
         prog = self._progress()
-        # Ambition decreases with progress; never below 40% total
-        target = self.total_value * (0.90 - 0.40 * prog)
-        target = max(target, self.total_value * 0.40)
-        # If we've seen something good, don't go below it by much
+        # Ambition decreases with progress; accelerate concession if stalled
+        high, low = 0.95, 0.42
+        extra = min(0.15, 0.05 * self.stall)
+        target = self.total_value * (high - (high - low + extra) * prog)
+        target = max(target, self.total_value * (0.35))
         if self.best_seen > 0:
             target = max(target, self.best_seen * 0.97)
 

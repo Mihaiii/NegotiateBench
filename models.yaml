@@ -27,3 +27,5 @@ models:
     openrouter_name: x-ai/grok-4.1-fast
   - display_name: Grok 4
     openrouter_name: x-ai/grok-4
+  - display_name: GLM 4.7
+    openrouter_name: z-ai/glm-4.7

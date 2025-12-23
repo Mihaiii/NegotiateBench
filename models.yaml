@@ -13,8 +13,6 @@ models:
     openrouter_name: qwen/qwen3-max
   - display_name: MiniMax M2.1
     openrouter_name: minimax/minimax-m2.1
-  - display_name: Grok Code Fast 1
-    openrouter_name: x-ai/grok-code-fast-1
   - display_name: Grok 4.1 Fast
     openrouter_name: x-ai/grok-4.1-fast
   - display_name: Grok 4

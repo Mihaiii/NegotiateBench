@@ -5,15 +5,17 @@ class Agent:
         self.values = values
         self.max_rounds = max_rounds
         
-        self.current_round = 0
-        if me == 1:  # If starting second, effectively round 0 has passed from my perspective
+        self.current_round = 0.0
+        # If I go second, the first round has technically started, and the opponent has made their offer.
+        if me == 1:
             self.current_round = 0.5 
         
         self.total_value_to_me = sum(counts[i] * values[i] for i in range(len(counts)))
         self.num_object_types = len(counts)
         
-        self.initial_demand_ratio = 1.0  # Start by demanding everything
-        self.my_last_offer = None # To remember what I offered last
+        # Initial demand for opponent to receive. We expect them to concede over time.
+        # Starting with a high demand for myself means a low concession to the opponent.
+        self.initial_self_demand_ratio = 1.0 
 
     def calculate_value(self, offer_items: list[int]) -> int:
         """Calculates the value of a given offer for me."""
@@ -25,121 +27,128 @@ class Agent:
         It prioritizes getting more valuable items first while respecting counts.
         """
         
+        # If I value nothing, I should offer to take nothing.
         if self.total_value_to_me == 0:
             return [0] * self.num_object_types
 
+        # Ensure target_value_ratio is within [0.0, 1.0]
         target_value_ratio = max(0.0, min(1.0, target_value_ratio))
         target_value = int(self.total_value_to_me * target_value_ratio)
+        
         my_offer_counts = [0] * self.num_object_types
         current_value = 0
         
-        # Sort items by value_per_item in descending order.
+        # Create a list of (value_per_item, item_index) tuples and sort by value_per_item descending.
+        # This ensures we prioritize getting more valuable items first.
         item_info = []
         for i in range(self.num_object_types):
             item_info.append((self.values[i], i))
         item_info.sort(key=lambda x: x[0], reverse=True)
 
-        # Iterate through items, trying to add them to the offer to reach the target_value
         for value_per_item, item_idx in item_info:
             if current_value >= target_value:
-                break
+                break # Reached or exceeded target value
 
-            if value_per_item > 0: # Only consider valuable items for reaching the target value
+            if value_per_item > 0: # Only consider items with positive value to reach the target
                 num_can_take = self.counts[item_idx]
                 
-                # Calculate how many of the current item type we need to reach the target_value
-                needed_for_target = (target_value - current_value + value_per_item - 1) // value_per_item # Ceiling division
+                # Calculate how many items of this type are needed to reach the target value
+                # taking into account current value and the item's value.
+                # Use max(0, ...) to prevent negative numbers if current_value already high
+                needed_for_target = (target_value - current_value + value_per_item - 1) // value_per_item
                 
                 num_to_take = min(num_can_take, needed_for_target)
                 
                 my_offer_counts[item_idx] += num_to_take
                 current_value += num_to_take * value_per_item
-            
-        # After fulfilling target value with valuable items, distribute remaining zero-value items.
-        # If an item type is completely worthless to me, I'm indifferent to getting it or not.
-        # To make my offer more appealing, I can offer all worthless items to the partner if I don't need them.
-        # However, to be more robust, I'll take them myself if they are worthless to me, unless partner explicitly offers them.
+        
+        # After attempting to meet the target value with positive-valued items,
+        # assign remaining items. For items with zero value to me, I'm indifferent.
+        # The strategy here is to take all items that are worthless to me, as they don't affect my value,
+        # and it simplifies the offer. This might be perceived as aggressive, but it maximizes my share
+        # while keeping my value calculation simple.
         for i in range(self.num_object_types):
             if self.values[i] == 0:
-                my_offer_counts[i] = self.counts[i] # Take all worthless items
+                my_offer_counts[i] = self.counts[i] 
+
+        # Ensure that the offer does not exceed available counts
+        for i in range(self.num_object_types):
+            my_offer_counts[i] = min(my_offer_counts[i], self.counts[i])
 
         return my_offer_counts
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        if o is None:  # First offer by me
-            self.current_round = 0
-        else: # Offer received, it's my turn to respond
-            self.current_round += 0.5 # Each person gets a turn in a round, so 0.5 per offer
+        if o is None:  # This is my very first offer in the negotiation
+            # self.current_round is already 0.0 or 0.5 based on self.me
+            pass
+        else: # An offer was received from the partner
+            self.current_round += 0.5 # Increment my turn counter
 
-        total_turns = self.max_rounds * 2 
-        
         # Calculate negotiation progress (0.0 to 1.0)
-        # Using self.current_round / self.max_rounds for progress to represent round progression more directly.
+        # Using self.current_round relative to max_rounds.
+        # The negotiation ends when current_round >= max_rounds.
         progress = self.current_round / self.max_rounds
         progress = min(progress, 1.0) # Cap progress at 1.0
 
-        # Dynamic demand ratio: start high, decrease over time.
-        # Aim for at least 50% of my total value.
-        
-        min_acceptable_ratio = 0.5
+        # Define the range of acceptable value.
+        # I always want at least half of the total perceived value.
+        min_acceptable_value_ratio = 0.5
         if self.total_value_to_me == 0:
-            min_acceptable_ratio = 0.0 # If I value nothing, I'll accept 0.
+            min_acceptable_value_ratio = 0.0 # If I value nothing, I'll accept 0.
 
-        # A more aggressive decay that starts higher and drops faster.
-        # Using a cubic decay towards the end.
-        demand_ratio_decay = (1 - progress) ** 3
+        # Dynamic concession strategy:
+        # Start demanding self.initial_self_demand_ratio (1.0).
+        # Gradually concede towards min_acceptable_value_ratio as rounds progress.
+        # Using a cubic function for faster concession towards the end.
         
-        # The range of demand will be between initial_demand_ratio (1.0) and min_acceptable_ratio.
-        demand_ratio = min_acceptable_ratio + (self.initial_demand_ratio - min_acceptable_ratio) * demand_ratio_decay
+        # The fraction of the negotiation remaining (1.0 at start, 0.0 at end)
+        remaining_negotiation_fraction = 1.0 - progress
+        
+        # Calculate my current demand ratio. This ratio reduces from initial_self_demand_ratio
+        # down to min_acceptable_value_ratio as progress goes from 0 to 1.
+        # The cubic function (remaining_negotiation_fraction**3) makes concessions faster later.
+        current_self_demand_ratio = min_acceptable_value_ratio + \
+                                    (self.initial_self_demand_ratio - min_acceptable_value_ratio) * \
+                                    (remaining_negotiation_fraction ** 2) # Changed to square for smoother initial decline
 
-        # Ensure demand ratio doesn't exceed 1.0 or fall below 0.0
-        demand_ratio = max(min(demand_ratio, 1.0), 0.0)
+        # Ensure demand ratio is within valid bounds.
+        current_self_demand_ratio = max(min(current_self_demand_ratio, 1.0), 0.0)
 
-        # Check if it's the absolute last turn for *me* to accept an offer.
-        # This implies it's my turn in the very last round.
-        is_my_last_turn_to_act = (self.current_round == self.max_rounds - 0.5 and self.me == 0) or \
-                                 (self.current_round == self.max_rounds and self.me == 1)
-        is_last_offer_possible = self.current_round < self.max_rounds
+        # Determine if this is the last possible turn to make a deal.
+        # If I'm turn 0, my last chance to accept is at max_rounds - 0.5 (opponent's offer in last round)
+        # If I'm turn 1, my last chance to accept is at max_rounds (opponent's offer when my current_round hits max_rounds)
+        # This condition verifies if no more counter-offers can be made by ME after this turn.
+        can_make_another_offer = (self.current_round < self.max_rounds - 0.5)
 
-
-        # If an offer was made to me:
+        # Handle incoming offer from partner
         if o is not None:
             offer_value = self.calculate_value(o)
             
             # Acceptance conditions:
-            # 1. The offer meets or exceeds my current calculated demand ratio.
-            # 2. It's the absolute last turn for me to act, and the offer provides *any* positive value to me, preventing a total loss.
-            # 3. If everything is worthless to me, and the partner offers me 0, I accept.
+            # 1. The offer meets or exceeds my current calculated demand.
+            # 2. It's truly the last possible turn and the offer gives me something (or I value nothing), to avoid no-deal.
             
-            # If the offer is good enough based on current demand ratio
-            if offer_value >= self.total_value_to_me * demand_ratio:
+            if offer_value >= self.total_value_to_me * current_self_demand_ratio:
                 return None  # Accept offer
-            
-            # If it's the very last moment to accept to avoid getting nothing
-            if not is_last_offer_possible:
-                if offer_value > 0 or self.total_value_to_me == 0 : # Accept if it gives me something, or if I value nothing anyway
+
+            # If no more offers can be made by me and the offer provides *any* value (or I value nothing), accept.
+            # This is to prevent a no-deal scenario when time runs out.
+            if not can_make_another_offer: # This means after this turn, negotiation will end if I don't accept.
+                if offer_value > 0 or self.total_value_to_me == 0:
                     return None
             
-            # If I value nothing at all, and the offer gives me nothing (which is all I care about)
-            if self.total_value_to_me == 0 and offer_value == 0:
-                return None
-
-        # Create counter-offer (or initial offer)
-        my_offer_to_make = self.create_my_offer(demand_ratio)
+        # If no offer was accepted, or if it's my first turn, create a counter-offer.
+        my_offer_to_make = self.create_my_offer(current_self_demand_ratio)
         
-        # If it's the very last round and I still need to make an offer, be more flexible
-        # to ensure a deal if possible, even if it means accepting a lower value.
-        if not is_last_offer_possible: 
-            # Make a more generous offer to try and secure SOMETHING if faced with no deal.
-            # Here, I'm setting my demand to just break even (0.5) or slightly above if I'm first.
-            final_concession_ratio = min_acceptable_ratio 
-            
-            # If I am the one making the last offer, I'd aim for slightly above 0.5 to make it seem like a good deal.
-            # But in the spirit of avoiding no deal, I concede to 0.5.
-            if self.total_value_to_me == 0:
-                final_concession_ratio = 0.0
-
-            my_offer_to_make = self.create_my_offer(final_concession_ratio)
-
-        self.my_last_offer = my_offer_to_make 
+        # Before returning the offer, perform one last check for validity
+        # An offer is valid if:
+        # 1. All counts are non-negative.
+        # 2. No count exceeds the remaining total count for that item type.
+        
+        for i in range(self.num_object_types):
+            if my_offer_to_make[i] < 0:
+                my_offer_to_make[i] = 0
+            if my_offer_to_make[i] > self.counts[i]:
+                my_offer_to_make[i] = self.counts[i]
+                
         return my_offer_to_make

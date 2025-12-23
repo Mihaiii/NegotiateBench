@@ -3,10 +3,13 @@ from typing import List, Optional
 
 class Agent:
     """
-    A haggling agent that searches the allocation space when feasible and otherwise
-    uses a greedy heuristic. It concedes smoothly over time, learns crude opponent
-    preferences from their offers, prefers offers that look acceptable to them, and
-    avoids ending with no deal when acting second.
+    GPT 5.1 Codex Max – negotiation bot.
+    Strategy:
+    - Pre‑enumerate all feasible allocations (if space is small) for exact search.
+    - Otherwise, use a greedy concession heuristic.
+    - Smoothly concedes over time; accepts good incoming offers.
+    - Crude opponent modelling from what they keep/give.
+    - Avoids deadlock on the last word (especially when acting second).
     """
 
     def __init__(self, me: int, counts: List[int], values: List[int], max_rounds: int):
@@ -15,20 +18,19 @@ class Agent:
         self.values = values
         self.n = len(counts)
         self.max_rounds = max_rounds
-        self.turn = 0  # our turns only
+        self.turn = 0  # number of my turns elapsed
         self.total_value = sum(c * v for c, v in zip(counts, values))
 
-        # Opponent preference weights (heuristic)
-        # start as inverse of ours to encourage complementarity
-        base = (max(values) if values else 0) + 1
-        self.opp_w = [base - v for v in values]
+        # Opponent preference weights (initialized as inverse of mine, min 1)
+        base = (max(values) if values else 0) + 2
+        self.opp_w = [max(1, base - v) for v in values]
 
-        self.best_seen = 0
         self.last_offer_made: Optional[List[int]] = None
         self.last_offer_from_them: Optional[List[int]] = None
+        self.best_seen = 0
         self.stall = 0
 
-        # Pre-enumerate all allocations if space is reasonable
+        # Pre-enumerate offers if feasible
         self.candidates = None  # list of (my_val, offer)
         space = 1
         for c in counts:
@@ -38,8 +40,7 @@ class Agent:
         if space <= 250_000 and self.total_value > 0:
             self.candidates = []
             self._enumerate(0, [0] * self.n)
-            # Sort by my value descending
-            self.candidates.sort(key=lambda x: -x[0])
+            self.candidates.sort(key=lambda x: -x[0])  # by my value desc
 
         # Greedy removal order (cheapest first)
         self.idx_asc = sorted(range(self.n), key=lambda i: (self.values[i], i))
@@ -67,60 +68,64 @@ class Agent:
         return est
 
     def _progress(self) -> float:
+        # 0 at first my turn, 1 at my last turn
         if self.max_rounds <= 1:
             return 1.0
-        return max(0.0, min(1.0, (self.turn - 1) / (self.max_rounds - 1)))
+        return min(1.0, max(0.0, (self.turn) / (self.max_rounds - 1)))
 
     def _accept_threshold(self, last_turn: bool) -> float:
-        # Linear from 0.82 to 0.47 of total, with floor
+        # Linear from 0.88 -> 0.50 of total, with floor
         if self.total_value == 0:
             return 0.0
-        start, end = 0.82, 0.47
+        start, end = 0.88, 0.50
         prog = self._progress()
         th = self.total_value * (start - (start - end) * prog)
         floor = 0.30 if last_turn else 0.35
         return max(th, self.total_value * floor)
 
     def _target_value(self) -> float:
-        # Ambition from 0.9 to 0.5, faster concession if stalled
-        high, low = 0.90, 0.50
+        # Aspiration from 0.95 -> 0.52, faster if stalled
+        high, low = 0.95, 0.52
         prog = self._progress()
-        extra = min(0.15, 0.05 * self.stall)
+        extra = min(0.18, 0.06 * self.stall)
         t = self.total_value * (high - (high - low + extra) * prog)
         t = max(t, self.total_value * 0.35)
         if self.best_seen > 0:
-            t = max(t, self.best_seen * 0.95)
+            t = max(t, self.best_seen * 0.96)
         return t
 
-    def _select_offer(self, target: float) -> List[int]:
+    def _select_offer(self, target: float, forbid: Optional[List[int]]) -> List[int]:
+        # Exact search if available
         if self.candidates:
-            best = None
+            chosen = None
             best_opp = -1
-            # first pass: offers meeting target
+            # First: offers meeting target
             for mv, off in self.candidates:
                 if mv < target:
-                    break  # sorted descending by mv
+                    break
+                if forbid is not None and off == forbid:
+                    continue
                 ov = self._opp_estimate(off)
                 if ov > best_opp:
-                    best = off
-                    best_opp = ov
-            if best is None:
-                # none meet target; pick highest mv, then opp-est
-                mv0, off0 = self.candidates[0]
-                best = off0
-                best_opp = self._opp_estimate(off0)
+                    chosen, best_opp = off, ov
+            # None meets target, pick highest mv, then opp_est among top mv
+            if chosen is None:
+                top_mv = self.candidates[0][0]
                 for mv, off in self.candidates:
-                    if mv < mv0:
+                    if mv < top_mv:
                         break
+                    if forbid is not None and off == forbid:
+                        continue
                     ov = self._opp_estimate(off)
                     if ov > best_opp:
-                        best = off
-                        best_opp = ov
-            return best.copy()
+                        chosen, best_opp = off, ov
+            if chosen is None:
+                chosen = self.candidates[0][1]
+            return chosen.copy()
 
-        # Greedy fallback: start with all, give away cheap items while >= target
+        # Greedy fallback
         offer = self.counts.copy()
-        # give away items we value zero
+        # give away zero-value items
         for i, v in enumerate(self.values):
             if v == 0:
                 offer[i] = 0
@@ -132,15 +137,22 @@ class Agent:
             while offer[i] > 0 and cur_val - v >= target:
                 offer[i] -= 1
                 cur_val -= v
+        # Avoid repeating forbidden
+        if forbid is not None and offer == forbid:
+            # concede one cheapest unit if possible
+            for i in self.idx_asc:
+                if offer[i] > 0:
+                    offer[i] -= 1
+                    break
         return offer
 
     def _update_opp_from_offer(self, o: List[int]) -> None:
+        # Increase weights for items they keep, decrease if they often give away
         for i in range(self.n):
             keep = self.counts[i] - o[i]
             if keep > 0:
                 self.opp_w[i] += keep * 2
             else:
-                # slight decay if always given away
                 self.opp_w[i] = max(1, self.opp_w[i] - 1)
 
     # -------------- core API --------------
@@ -148,7 +160,7 @@ class Agent:
         self.turn += 1
         last_turn = (self.turn == self.max_rounds)
 
-        # If nothing is valuable, accept anything
+        # If no value for me, accept anything
         if self.total_value == 0:
             return None if o is not None else [0] * self.n
 
@@ -163,31 +175,32 @@ class Agent:
                 self.stall = 0
             self.last_offer_from_them = o.copy()
 
-        # If acting second on our last turn, accept anything positive to avoid no-deal
+        # If acting second on my last turn: accept best positive to avoid no deal
         if o is not None and last_turn and self.me == 1:
             if incoming_val > 0:
                 return None
 
-        # Acceptance decisions
+        # Acceptance logic
         if o is not None:
-            # Accept if they matched our previous offer
+            # Accept if they mirrored my last offer
             if self.last_offer_made is not None and o == self.last_offer_made:
                 return None
             accept_th = self._accept_threshold(last_turn)
             if incoming_val >= accept_th:
                 return None
-            # If late and incoming is close to best seen, accept
-            if self._progress() > 0.6 and incoming_val >= max(self.best_seen * 0.98, self.total_value * 0.5):
+            # Late stage: accept if close to best seen and reasonable
+            if self._progress() > 0.65 and incoming_val >= max(self.best_seen * 0.97, self.total_value * 0.5):
                 return None
-            # Avoid zero on final word
+            # Final safeguard: if last turn and offer positive
             if last_turn and incoming_val > 0:
                 return None
 
         # Build counter-offer
         target = self._target_value()
-        counter = self._select_offer(target)
+        forbid = o if o is not None else None
+        counter = self._select_offer(target, forbid)
 
-        # Break loops
+        # Break deadlock
         if o is not None and counter == o:
             return None
 

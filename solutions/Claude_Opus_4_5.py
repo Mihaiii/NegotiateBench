@@ -8,26 +8,37 @@ class Agent:
         self.turn = 0
         self.n = len(counts)
         self.opponent_offers = []
+        self.my_offers = []
         
     def _value(self, offer: list[int]) -> int:
         return sum(o * v for o, v in zip(offer, self.values))
     
-    def _infer_opponent_values(self) -> list[float]:
-        """Estimate opponent's relative preferences from their offers."""
-        if not self.opponent_offers:
-            return [1.0] * self.n
-        
-        # Items opponent keeps for themselves (counts - what they offer us)
-        kept_counts = [0.0] * self.n
-        for offer in self.opponent_offers:
-            for i in range(self.n):
-                kept_counts[i] += self.counts[i] - offer[i]
-        
-        # Normalize - higher = opponent values more
-        total_kept = sum(kept_counts) + 0.01
-        return [k / total_kept for k in kept_counts]
+    def _opponent_gets(self, my_offer: list[int]) -> list[int]:
+        return [self.counts[i] - my_offer[i] for i in range(self.n)]
     
-    def _generate_all_splits(self):
+    def _infer_opponent_values(self) -> list[float]:
+        """Estimate opponent's relative value per item type."""
+        if not self.opponent_offers:
+            # Assume inverse of our values initially
+            inv = [1.0 / (v + 0.1) for v in self.values]
+            total_inv = sum(inv) + 0.01
+            return [x / total_inv for x in inv]
+        
+        # Weight recent offers more heavily
+        weights = [0.5 ** (len(self.opponent_offers) - i - 1) for i in range(len(self.opponent_offers))]
+        kept_scores = [0.0] * self.n
+        
+        for w, offer in zip(weights, self.opponent_offers):
+            for i in range(self.n):
+                # What they keep = counts - what they offer us
+                kept = self.counts[i] - offer[i]
+                if self.counts[i] > 0:
+                    kept_scores[i] += w * (kept / self.counts[i])
+        
+        total = sum(kept_scores) + 0.01
+        return [k / total for k in kept_scores]
+    
+    def _generate_splits(self):
         """Generate all possible splits."""
         splits = []
         def gen(idx, current):
@@ -41,56 +52,66 @@ class Agent:
         gen(0, [])
         return splits
     
-    def _best_offer(self, min_my_value: int, opponent_prefs: list[float]) -> list[int] | None:
-        """Find best offer giving us at least min_my_value, maximizing opponent's likely value."""
-        splits = self._generate_all_splits()
-        best = None
-        best_score = -1
+    def _find_offer(self, min_value: int, opp_prefs: list[float]) -> list[int] | None:
+        """Find offer giving us at least min_value, maximizing opponent's estimated utility."""
+        splits = self._generate_splits()
+        best, best_score = None, (-1, -1)
         
         for split in splits:
             my_val = self._value(split)
-            if my_val < min_my_value:
+            if my_val < min_value:
                 continue
             
-            # Score by what we give opponent (weighted by their inferred preferences)
-            opp_score = sum((self.counts[i] - split[i]) * opponent_prefs[i] for i in range(self.n))
-            # Tie-break: prefer giving away our zero-value items
-            zero_given = sum(self.counts[i] - split[i] for i in range(self.n) if self.values[i] == 0)
+            opp_score = sum((self.counts[i] - split[i]) * opp_prefs[i] for i in range(self.n))
+            score = (opp_score, -my_val)  # Maximize opponent value, minimize our greed
             
-            score = (opp_score, zero_given, -my_val)  # Give more, take less
-            if best is None or score > best_score:
+            if score > best_score:
                 best_score = score
                 best = split
-        
         return best
     
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn += 1
         total_turns = 2 * self.max_rounds
-        progress = self.turn / total_turns
-        is_final = self.turn >= total_turns
+        remaining = total_turns - self.turn
+        is_last = remaining == 0
         
         if o is not None:
             self.opponent_offers.append(o)
             offer_val = self._value(o)
             
-            # Accept conditions
-            if is_final:
-                return None if offer_val > 0 else self._best_offer(1, self._infer_opponent_values())
+            # Accept if it's the last turn and we get something
+            if is_last:
+                return None if offer_val > 0 else [c for c in self.counts]  # Demand all if zero
             
-            # Dynamic threshold: starts at 55%, drops to 25%
-            threshold = self.total * max(0.25, 0.55 - 0.35 * progress)
+            # Dynamic acceptance: be more lenient as rounds decrease
+            base_threshold = 0.50 if self.me == 0 else 0.45
+            decay = 0.35 * (self.turn / total_turns)
+            threshold = self.total * max(0.20, base_threshold - decay)
+            
+            # Accept good offers earlier for efficiency
             if offer_val >= threshold:
                 return None
         
-        # Demand curve: starts at 75%, drops to 30%
-        demand = self.total * max(0.30, 0.75 - 0.50 * progress)
-        target = max(1, int(demand))
-        
         opp_prefs = self._infer_opponent_values()
-        result = self._best_offer(target, opp_prefs)
+        
+        # Demand curve: start high, reduce over time
+        if self.turn == 1:
+            demand_frac = 0.80
+        else:
+            base_demand = 0.65
+            decay = 0.40 * (self.turn / total_turns)
+            demand_frac = max(0.25, base_demand - decay)
+        
+        target = max(1, int(self.total * demand_frac))
+        result = self._find_offer(target, opp_prefs)
+        
+        # Fallback: find any positive value offer
+        if result is None:
+            result = self._find_offer(1, opp_prefs)
         
         if result is None:
-            result = self._best_offer(1, opp_prefs)
+            result = self.counts.copy()
         
+        self.my_offers.append(result)
         return result

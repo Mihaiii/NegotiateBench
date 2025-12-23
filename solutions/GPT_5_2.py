@@ -4,20 +4,20 @@ import random
 
 class Agent:
     """
-    Correct semantics for this haggling framework:
-    - Incoming offer `o` is how many items the opponent proposes to GIVE US (what we get).
-    - Our returned offer is how many items WE want to get.
-    - Returning None means we ACCEPT the opponent's last offer (o is not None).
+    IMPORTANT (matches the provided negotiation transcripts/profits):
+    - Incoming offer `o` is how many items THE OPPONENT WANTS TO KEEP for themselves.
+    - If we accept, we will receive counts - o.
+    - If we counter (return a list), it is how many items WE want to keep for ourselves.
+    - Returning None means ACCEPT (only valid when o is not None).
 
-    Approach:
-    - Maintain a small particle belief over opponent per-unit values u[i] >= 0, scaled so
-      sum_i counts[i]*u[i] == our_total (given equal totals).
-    - Update belief from opponent offers (they tend to keep what they value) and from their
-      rejection of our last offer (they likely rejected if their value would be below a
-      time-dependent acceptance threshold).
-    - Construct offers that meet a target value for us while minimizing expected opponent
-      "loss" (value, under mean u, of items we keep), using DP when feasible or a greedy fallback.
-    - Accept if the offer meets our time-dependent floor, or is competitive with our best counter.
+    Strategy:
+    - Particle belief over opponent per-unit values u[i] >= 0 with the constraint:
+        sum_i counts[i] * u[i] == our_total
+    - Update belief from:
+        (a) opponent offers (they tend to keep what they value)
+        (b) opponent rejecting our last offer (their kept value likely below a time-dependent threshold)
+    - Choose counter-offers that meet our time-dependent value floor while minimizing opponent "loss"
+      (value of items we keep), using DP when feasible.
     """
 
     def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
@@ -30,9 +30,14 @@ class Agent:
         self.total_int = sum(c * v for c, v in zip(self.counts, self.values))
         self.total = float(self.total_int)
 
+        # our turn index among our own turns: 0..max_rounds-1
         self.step = 0
-        self.last_sent = None  # last offer we sent (what we get)
-        self.best_seen = 0     # best value we could get by accepting any seen opponent offer
+
+        # last offer we sent: how many we want to KEEP
+        self.last_sent_keep = None
+
+        # best sure value we've seen (by accepting some opponent offer)
+        self.best_seen = 0
 
         seed = (
             1000003 * sum(self.counts)
@@ -45,11 +50,11 @@ class Agent:
         self.pos_types = [i for i in range(self.n) if self.counts[i] > 0 and self.values[i] > 0]
         self.zero_types = [i for i in range(self.n) if self.counts[i] > 0 and self.values[i] <= 0]
 
-        self.particles, self.weights = self._init_particles(m=160)
+        self.particles, self.weights = self._init_particles(m=240)
 
     # ------------------------- basic helpers -------------------------
 
-    def _valid_offer(self, o) -> bool:
+    def _valid_offer_keep(self, o) -> bool:
         if not isinstance(o, (list, tuple)) or len(o) != self.n:
             return False
         for i, x in enumerate(o):
@@ -67,8 +72,11 @@ class Agent:
             return 1.0
         return 1.0 / (1.0 + math.exp(-z))
 
-    def _progress(self) -> float:
-        # overall turn index in [0, 2*max_rounds-1]
+    def _overall_progress(self) -> float:
+        """
+        Overall turn index in [0, 2*max_rounds-1].
+        Our own step is 0..max_rounds-1, and me is 0 (first) or 1 (second).
+        """
         if self.max_rounds <= 1:
             return 1.0
         overall = 2 * self.step + self.me
@@ -79,12 +87,14 @@ class Agent:
     def _is_last_our_turn(self) -> bool:
         return self.step >= self.max_rounds - 1
 
-    def _my_value_get(self, my_get: list[int]) -> int:
-        return sum(self.values[i] * my_get[i] for i in range(self.n))
+    def _my_value_keep(self, my_keep: list[int]) -> int:
+        return sum(self.values[i] * my_keep[i] for i in range(self.n))
 
-    def _opp_keep_from_my_get(self, my_get: list[int]) -> list[int]:
-        # If we get my_get, opponent keeps counts - my_get
-        return [self.counts[i] - my_get[i] for i in range(self.n)]
+    def _my_keep_from_their_keep(self, their_keep: list[int]) -> list[int]:
+        return [self.counts[i] - their_keep[i] for i in range(self.n)]
+
+    def _their_keep_from_my_keep(self, my_keep: list[int]) -> list[int]:
+        return [self.counts[i] - my_keep[i] for i in range(self.n)]
 
     # ------------------------- opponent belief -------------------------
 
@@ -95,14 +105,14 @@ class Agent:
         s = self.total / denom
         return [max(0.0, wi * s) for wi in w]
 
-    def _init_particles(self, m: int = 160):
+    def _init_particles(self, m: int = 240):
         if self.total_int <= 0:
             return [[0.0] * self.n], [1.0]
 
         parts = []
         eps = 1e-6
 
-        # Extremes: concentrate value on one type
+        # Extremes: concentrate on one type
         for j in range(self.n):
             w = [eps] * self.n
             w[j] = 1.0
@@ -111,10 +121,10 @@ class Agent:
         # Uniform
         parts.append(self._scaled_from_weights([1.0] * self.n))
 
-        # Correlated with our values (often helpful)
+        # Correlated with our values (often, but not always)
         parts.append(self._scaled_from_weights([max(eps, float(v)) for v in self.values]))
 
-        # Random positive weights
+        # Random exponential weights (Dirichlet-ish)
         while len(parts) < m:
             w = [-math.log(max(1e-12, self.rng.random())) for _ in range(self.n)]
             parts.append(self._scaled_from_weights(w))
@@ -138,65 +148,64 @@ class Agent:
                 mu[i] += w * u[i]
         return mu
 
-    def _opp_value_keep(self, opp_keep: list[int], u: list[float]) -> float:
-        return sum(opp_keep[i] * u[i] for i in range(self.n))
+    def _opp_value_keep(self, their_keep: list[int], u: list[float]) -> float:
+        return sum(their_keep[i] * u[i] for i in range(self.n))
 
     def _theta_accept(self) -> float:
-        # Estimated opponent acceptance threshold in their own value, decreasing over time.
-        p = self._progress()
-        frac = 0.72 - 0.48 * (p ** 1.12)  # ~0.72 -> ~0.24
-        if frac < 0.20:
-            frac = 0.20
+        # Opponent acceptance threshold (their value of what they KEEP), decreasing with time.
+        p = self._overall_progress()
+        frac = 0.72 - 0.50 * (p ** 1.15)  # ~0.72 -> ~0.22
+        if frac < 0.18:
+            frac = 0.18
         return frac * self.total
 
     def _theta_offer(self) -> float:
-        # Their offers usually ask for somewhat more than their acceptance threshold.
-        p = self._progress()
-        frac = 0.80 - 0.40 * (p ** 1.08)  # ~0.80 -> ~0.40
-        if frac < 0.30:
-            frac = 0.30
-        if frac > 0.86:
-            frac = 0.86
+        # Opponent offers often target a bit above what they'd accept.
+        p = self._overall_progress()
+        frac = 0.80 - 0.42 * (p ** 1.10)  # ~0.80 -> ~0.38
+        if frac < 0.28:
+            frac = 0.28
+        if frac > 0.88:
+            frac = 0.88
         return frac * self.total
 
     def _update_from_rejection_of_last(self) -> None:
-        if self.last_sent is None or self.total_int <= 0:
+        if self.last_sent_keep is None or self.total_int <= 0:
             return
         theta = self._theta_accept()
-        kscale = 0.09 * self.total + 1e-9
+        kscale = 0.10 * self.total + 1e-9
 
-        opp_keep = self._opp_keep_from_my_get(self.last_sent)
+        their_keep = self._their_keep_from_my_keep(self.last_sent_keep)
         for k, u in enumerate(self.particles):
-            v = self._opp_value_keep(opp_keep, u)
-            p_acc = self._sigmoid((v - theta) / kscale)
-            # If they'd likely accept under this particle but they rejected, downweight it.
-            self.weights[k] *= max(1e-6, (1.0 - p_acc)) ** 1.2
+            v_keep = self._opp_value_keep(their_keep, u)
+            p_acc = self._sigmoid((v_keep - theta) / kscale)
+            # They rejected, so particles where acceptance was likely are downweighted.
+            self.weights[k] *= max(1e-6, (1.0 - p_acc)) ** 1.15
         self._renormalize()
 
-    def _update_from_their_offer(self, their_offer_to_us: list[int]) -> None:
+    def _update_from_their_offer(self, their_keep: list[int]) -> None:
         if self.total_int <= 0:
             return
         theta = self._theta_offer()
-        kscale = 0.11 * self.total + 1e-9
+        kscale = 0.12 * self.total + 1e-9
 
-        opp_keep = self._opp_keep_from_my_get(their_offer_to_us)
         for k, u in enumerate(self.particles):
-            keep_v = self._opp_value_keep(opp_keep, u)
-            like = 0.06 + 0.94 * self._sigmoid((keep_v - theta) / kscale)
+            keep_v = self._opp_value_keep(their_keep, u)
+            like = 0.05 + 0.95 * self._sigmoid((keep_v - theta) / kscale)
             self.weights[k] *= like
         self._renormalize()
 
-    def _p_opp_accept(self, my_get: list[int]) -> float:
+    def _p_opp_accept_my_keep(self, my_keep: list[int]) -> float:
         if self.total_int <= 0:
             return 1.0
         theta = self._theta_accept()
-        kscale = 0.09 * self.total + 1e-9
-        opp_keep = self._opp_keep_from_my_get(my_get)
+        kscale = 0.10 * self.total + 1e-9
+        their_keep = self._their_keep_from_my_keep(my_keep)
 
         acc = 0.0
         for w, u in zip(self.weights, self.particles):
-            v = self._opp_value_keep(opp_keep, u)
-            acc += w * self._sigmoid((v - theta) / kscale)
+            v_keep = self._opp_value_keep(their_keep, u)
+            acc += w * self._sigmoid((v_keep - theta) / kscale)
         return acc
 
     # ------------------------- my thresholds -------------------------
@@ -205,26 +214,26 @@ class Agent:
         if self.total_int <= 0:
             return 0.0
 
-        p = self._progress()
+        p = self._overall_progress()
         last = self._is_last_our_turn()
 
-        # If we're second and it's our last turn, countering guarantees 0.
+        # If we are second and it's our last turn, countering yields 0 for sure -> accept anything (>=0).
         if last and self.me == 1:
             return 0.0
 
         # Concede over time.
-        frac = 0.93 - 0.63 * (p ** 1.25)  # ~0.93 -> ~0.30
-        if frac < 0.18:
-            frac = 0.18
+        frac = 0.92 - 0.66 * (p ** 1.20)  # ~0.92 -> ~0.26
+        if frac < 0.16:
+            frac = 0.16
 
-        # If we're first and it's our last turn, make it easier to close.
+        # If we're first and it's our last turn to propose, we need to close.
         if last and self.me == 0:
             frac = min(frac, 0.22)
 
         floor = frac * self.total
 
-        # Don't accept far below best seen except late.
-        floor = max(floor, self.best_seen - (0.07 + 0.30 * p) * self.total)
+        # Don't drop far below the best sure offer we've seen, unless late.
+        floor = max(floor, self.best_seen - (0.06 + 0.33 * p) * self.total)
 
         if floor < 0.0:
             return 0.0
@@ -234,14 +243,14 @@ class Agent:
 
     # ------------------------- offer construction -------------------------
 
-    def _base_ask(self) -> list[int]:
-        # Ask for all items we value; concede all items we value at 0.
+    def _base_ask_keep(self) -> list[int]:
+        # We keep all items that have positive value to us; give all zero-value items away.
         return [self.counts[i] if self.values[i] > 0 else 0 for i in range(self.n)]
 
     def _dp_min_opp_loss_for_my_value(self, opp_mu: list[float]):
         """
-        DP over achievable my_value. dp[v] = minimal expected opponent value of items we keep
-        (i.e., "opp_loss") to achieve exactly my_value==v.
+        DP over achievable my_value.
+        dp[v] = minimal opponent-loss (expected opponent value of items we keep) to achieve exact v.
         """
         V = self.total_int
         INF = 1e100
@@ -266,7 +275,7 @@ class Agent:
                 base = dp[v0]
                 if base >= INF:
                     continue
-                for x in range(c + 1):  # x units of idx we get
+                for x in range(c + 1):  # x units we keep
                     v = v0 + x * mv
                     if v > V:
                         break
@@ -282,80 +291,84 @@ class Agent:
 
         return types, dp, prevs, takes
 
-    def _reconstruct(self, types, prevs, takes, v_target: int) -> list[int]:
-        my_get = [0] * self.n
+    def _reconstruct_keep(self, types, prevs, takes, v_target: int) -> list[int]:
+        my_keep = [0] * self.n
         v = v_target
         for stage in range(len(types) - 1, -1, -1):
             idx = types[stage]
             x = takes[stage][v]
-            my_get[idx] = x
+            my_keep[idx] = x
             v = prevs[stage][v] if v >= 0 else 0
+        # always give away zero-valued types
         for i in self.zero_types:
-            my_get[i] = 0
-        return my_get
+            my_keep[i] = 0
+        return my_keep
 
-    def _greedy_for_target(self, opp_mu: list[float], target_value: int) -> list[int]:
-        # Start from asking for everything valuable, then give away units that matter most to opp per our value.
-        get = self._base_ask()
-        cur = self._my_value_get(get)
+    def _greedy_for_target_keep(self, opp_mu: list[float], target_value: int) -> list[int]:
+        # Start from keeping everything valuable, then give away units that are "expensive" to opponent per our value.
+        keep = self._base_ask_keep()
+        cur = self._my_value_keep(keep)
 
-        idxs = [i for i in self.pos_types if get[i] > 0]
+        idxs = [i for i in self.pos_types if keep[i] > 0]
         idxs.sort(key=lambda i: (opp_mu[i] / max(1e-9, self.values[i])), reverse=True)
 
         changed = True
         while changed:
             changed = False
             for i in idxs:
-                if get[i] <= 0:
+                if keep[i] <= 0:
                     continue
                 if cur - self.values[i] >= target_value:
-                    get[i] -= 1
+                    keep[i] -= 1
                     cur -= self.values[i]
                     changed = True
 
         for i in self.zero_types:
-            get[i] = 0
-        return get
+            keep[i] = 0
+        return keep
 
-    def _choose_counter(self, their_offer_to_us: list[int] | None) -> list[int]:
+    def _choose_counter_keep(self, their_keep: list[int] | None) -> list[int]:
         if self.total_int <= 0:
             return [0] * self.n
 
-        p = self._progress()
+        p = self._overall_progress()
         floor = self._my_floor()
         floor_i = int(math.ceil(floor - 1e-9))
 
         opp_mu = self._mean_opp_unit()
 
         # Candidate target values for us
-        fracs = [0.99, 0.97, 0.95, 0.92, 0.88, 0.84, 0.80, 0.76, 0.72, 0.68,
-                 0.64, 0.60, 0.56, 0.52, 0.48, 0.44, 0.40, 0.36, 0.32, 0.28, 0.24, 0.20]
+        fracs = [
+            0.99, 0.97, 0.95, 0.92, 0.88, 0.84, 0.80, 0.76, 0.72,
+            0.68, 0.64, 0.60, 0.56, 0.52, 0.48, 0.44, 0.40, 0.36,
+            0.32, 0.28, 0.24, 0.20
+        ]
         targets = {self.total_int, max(0, min(self.total_int, floor_i))}
         for f in fracs:
             targets.add(int(self.total_int * f))
 
-        # Also consider their current offer value (and slightly above it)
-        if their_offer_to_us is not None:
-            v_their = self._my_value_get(their_offer_to_us)
-            targets.add(v_their)
-            targets.add(min(self.total_int, v_their + int(0.04 * self.total)))
+        # Also consider the value we'd get if we accepted their current proposal
+        if their_keep is not None:
+            my_keep_if_accept = self._my_keep_from_their_keep(their_keep)
+            v_acc = self._my_value_keep(my_keep_if_accept)
+            targets.add(v_acc)
+            targets.add(min(self.total_int, v_acc + int(0.04 * self.total)))
 
         cand = {}
 
         def add(x: list[int]):
             for i in self.zero_types:
                 x[i] = 0
-            if self._valid_offer(x):
+            if self._valid_offer_keep(x):
                 cand[tuple(x)] = x
 
-        add(self._base_ask())
+        add(self._base_ask_keep())
 
-        use_dp = self.total_int <= 5200 and len(self.pos_types) <= 10
+        use_dp = (self.total_int <= 8000 and len(self.pos_types) <= 10)
         if use_dp:
             types, dp_loss, prevs, takes = self._dp_min_opp_loss_for_my_value(opp_mu)
             reachable = [v < 1e80 for v in dp_loss]
 
-            # For each target, pick the *least opponent-loss* among values >= target.
             for t in sorted(targets, reverse=True):
                 if t < floor_i:
                     continue
@@ -366,98 +379,113 @@ class Agent:
                     if reachable[v] and dp_loss[v] < best_loss - 1e-12:
                         best_loss = dp_loss[v]
                         best_v = v
-                        # early exit if we found an exact target with good loss
                         if v == t:
                             break
                 if best_v is not None:
-                    add(self._reconstruct(types, prevs, takes, best_v))
+                    add(self._reconstruct_keep(types, prevs, takes, best_v))
         else:
             for t in sorted(targets, reverse=True):
                 if t < floor_i:
                     continue
-                add(self._greedy_for_target(opp_mu, t))
+                add(self._greedy_for_target_keep(opp_mu, t))
 
-        # Score offers: expected utility with late-stage closing bias
+        # Score candidates
         best = None
-        best_score = -1.0
+        best_score = -1e100
         for off in cand.values():
-            myv = self._my_value_get(off)
+            myv = self._my_value_keep(off)
             if myv + 1e-9 < floor:
                 continue
-            pacc = self._p_opp_accept(off)
 
-            score = myv * pacc
-            score += (0.01 + 0.10 * p) * self.total * pacc  # prefer deals late
-            if p < 0.40 and pacc < 0.02:
-                score *= 0.25  # avoid hopeless anchors early
+            pacc = self._p_opp_accept_my_keep(off)
+
+            # closeness to their last proposal (helps agreement)
+            closeness = 0.0
+            if their_keep is not None:
+                implied_their_keep = self._their_keep_from_my_keep(off)
+                l1 = sum(abs(implied_their_keep[i] - their_keep[i]) for i in range(self.n))
+                closeness = -0.012 * self.total * (l1 / max(1, sum(self.counts)))
+
+            # Risk-aware expected utility; later we weight acceptance more.
+            accept_weight = 0.35 + 0.55 * p
+            score = myv * ((1.0 - accept_weight) + accept_weight * pacc)
+            score += (0.02 + 0.10 * p) * self.total * pacc
+            score += closeness
+
+            # Avoid hopeless anchors early
+            if p < 0.35 and pacc < 0.03:
+                score *= 0.35
 
             if score > best_score:
                 best_score = score
                 best = off
 
         if best is None:
-            best = self._base_ask()
+            best = self._base_ask_keep()
 
-        self.last_sent = list(best)
+        self.last_sent_keep = list(best)
         return best
 
     # ------------------------- main API -------------------------
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        # If everything is worthless to us, accept any valid offer; else ask for nothing (doesn't matter).
+        # If everything is worthless to us, accept anything.
         if self.total_int <= 0:
             self.step += 1
-            if o is not None and self._valid_offer(o):
+            if o is not None and self._valid_offer_keep(o):
                 return None
             return [0] * self.n
 
         last = self._is_last_our_turn()
 
         if o is not None:
-            if not self._valid_offer(o):
-                counter = self._choose_counter(None)
+            if not self._valid_offer_keep(o):
+                counter = self._choose_counter_keep(None)
                 self.step += 1
                 return counter
 
-            their_offer_to_us = list(o)
+            their_keep = list(o)
+            my_keep_if_accept = self._my_keep_from_their_keep(their_keep)
 
-            # Their new offer implies rejection of our last (if any)
+            # New opponent offer implies our last offer was rejected (if any)
             self._update_from_rejection_of_last()
-            self._update_from_their_offer(their_offer_to_us)
+            self._update_from_their_offer(their_keep)
 
-            myv_accept = self._my_value_get(their_offer_to_us)
+            myv_accept = self._my_value_keep(my_keep_if_accept)
             if myv_accept > self.best_seen:
                 self.best_seen = myv_accept
 
-            # If we're second and it's our last turn: countering guarantees 0, so accept.
+            # If we're second and it's our last turn: countering forces 0, so accept.
             if last and self.me == 1:
                 self.step += 1
                 return None
 
             floor = self._my_floor()
 
-            counter = self._choose_counter(their_offer_to_us)
-            exp_counter = self._my_value_get(counter) * self._p_opp_accept(counter)
+            counter = self._choose_counter_keep(their_keep)
+            pacc_counter = self._p_opp_accept_my_keep(counter)
+            exp_counter = self._my_value_keep(counter) * pacc_counter
 
-            # Accept if it meets our floor, or is competitive with best counter in expectation.
+            # Accept if offer meets our floor.
             if myv_accept + 1e-9 >= floor:
                 self.step += 1
                 return None
 
             # Late deadlock avoidance: take a modest deal rather than risk 0.
-            if self._progress() > 0.86 and myv_accept >= 0.20 * self.total:
+            if self._overall_progress() > 0.88 and myv_accept >= 0.18 * self.total:
                 self.step += 1
                 return None
 
-            if myv_accept >= exp_counter - 0.02 * self.total:
+            # Compare sure acceptance vs risky counter.
+            if myv_accept >= exp_counter - 0.03 * self.total:
                 self.step += 1
                 return None
 
             self.step += 1
             return counter
 
-        # We start (no incoming offer): send anchored but acceptance-aware proposal.
-        self.last_sent = None
-        counter = self._choose_counter(None)
+        # We start (no incoming offer): send an anchored but acceptance-aware proposal.
+        self.last_sent_keep = None
+        counter = self._choose_counter_keep(None)
         self.step += 1
         return counter

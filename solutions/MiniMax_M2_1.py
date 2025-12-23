@@ -4,66 +4,63 @@ class Agent:
         self.counts = counts
         self.values = values
         self.total = sum(counts[i] * values[i] for i in range(len(counts)))
-        self.total_turns = 2 * max_rounds
-        self.turns = 0
-        self.min_acceptable = self.total * 0.35  # Accept at least 35% of total value
-        self.best_offer = None
-        self.best_offer_value = 0
-        self.offered_items = counts[:]  # Track what we initially demand
+        self.total_rounds = max_rounds
+        self.rounds_left = max_rounds
         
     def offer(self, o: list[int] | None) -> list[int] | None:
-        self.turns += 1
-        remaining_turns = self.total_turns - self.turns
+        self.rounds_left -= 1
         
         # If partner made an offer, evaluate it
         if o is not None:
             offered_value = sum(o[i] * self.values[i] for i in range(len(o)))
             
-            # Track best offer received
-            if offered_value > self.best_offer_value:
-                self.best_offer = o[:]
-                self.best_offer_value = offered_value
+            # Accept if offer meets our minimum threshold
+            # Use exponential acceptance threshold that increases as time runs out
+            acceptance_threshold = 0.30 + 0.20 * (1 - (self.rounds_left / self.total_rounds) ** 2)
+            min_acceptable = self.total * acceptance_threshold
             
-            # Accept if it's good enough
-            if offered_value >= self.min_acceptable:
+            if offered_value >= min_acceptable:
                 return None
             
-            # Calculate our fallback demand based on remaining time
-            concession_rate = remaining_turns / self.total_turns
-            target_value = self.min_acceptable + (self.total - self.min_acceptable) * concession_rate
+            # If we started second and this is the last round, accept almost anything
+            if self.me == 1 and self.rounds_left == 0 and offered_value > 0:
+                return None
             
-            # Build a strategic counter-offer
-            counter = [0] * len(self.counts)
-            remaining_items = self.counts[:]
+            # Build a reasonable counter-offer
+            counter = self._build_counter_offer(min_acceptable)
             
-            # First, try to get items we value most that partner might not want
-            # Sort items by value ratio (high value to us, hopefully low to partner)
-            item_indices = list(range(len(self.counts)))
-            item_indices.sort(key=lambda i: -self.values[i])
-            
-            for i in item_indices:
-                if self.values[i] > 0 and remaining_items[i] > 0:
-                    # Calculate how much value this item gives us
-                    item_value = self.values[i]
-                    
-                    # If we still need more value, take this item
-                    if sum(counter[j] * self.values[j] for j in range(len(counter))) < target_value:
-                        counter[i] = 1
-                        remaining_items[i] -= 1
-            
-            # If we haven't reached target value, add more items
-            for i in item_indices:
-                while remaining_items[i] > 0 and sum(counter[j] * self.values[j] for j in range(len(counter))) < target_value:
-                    counter[i] += 1
-                    remaining_items[i] -= 1
-            
+            # If no valid counter possible, accept current offer
+            if sum(counter[i] * self.values[i] for i in range(len(counter))) < min_acceptable:
+                return None
+                
             return counter
         
-        # First turn or no offer to respond to
-        # Make initial demand: ask for everything we value
-        initial_demand = [0] * len(self.counts)
-        for i in range(len(self.counts)):
-            if self.values[i] > 0:
-                initial_demand[i] = self.counts[i]
-        
+        # First turn: make a reasonable initial demand
+        # Start with about 60% of value and be willing to concede
+        initial_demand = self._build_counter_offer(self.total * 0.60)
         return initial_demand
+    
+    def _build_counter_offer(self, target_value: float) -> list[int]:
+        """Build a counter-offer targeting a specific value."""
+        counter = [0] * len(self.counts)
+        remaining_items = self.counts[:]
+        
+        # Sort items by value (high to low)
+        sorted_indices = sorted(range(len(self.counts)), key=lambda i: -self.values[i])
+        
+        # First pass: take high-value items
+        for i in sorted_indices:
+            if self.values[i] > 0 and remaining_items[i] > 0:
+                # Take as many as possible of high-value items
+                items_needed = max(0, int((target_value - sum(counter[j] * self.values[j] for j in range(len(counter))) + self.values[i] - 1) / self.values[i]))
+                take = min(remaining_items[i], items_needed + 1)  # +1 buffer
+                counter[i] = take
+                remaining_items[i] -= take
+        
+        # Second pass: if target not reached, add more items
+        for i in sorted_indices:
+            while remaining_items[i] > 0 and sum(counter[j] * self.values[j] for j in range(len(counter))) < target_value:
+                counter[i] += 1
+                remaining_items[i] -= 1
+        
+        return counter

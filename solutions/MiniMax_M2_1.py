@@ -12,153 +12,102 @@ class Agent:
         # Total value calculation
         self.total_value = sum(counts[i] * values[i] for i in range(self.n))
         
-        # Strategic parameters
-        self.initial_target = 0.52 * self.total_value  # More conservative start
-        self.min_acceptable = 0.35 * self.total_value   # Lower floor
-        self.concession_rate = 0.03                      # Slower concession
+        # Key strategy: Prioritize agreement over maximization
+        # Start more aggressively but be willing to concede
+        self.target = self.total_value * 0.55  # Start at 55%
+        self.minimum = self.total_value * 0.40  # Absolute minimum 40%
         
-        # Opponent modeling
-        self.opponent_offers = []
-        self.opponent_estimated_value = None
-        self.best_opponent_offer = None
+        # Track opponent's best offer to us
+        self.best_offer_value = 0
+        self.best_offer = None
+        self.offer_count = 0
         
-        # Item prioritization
+        # Item prioritization - value efficiency
         self.item_priority = sorted(range(self.n), 
-                                   key=lambda i: values[i], reverse=True)
+                                   key=lambda i: values[i] / max(1, counts[i]), reverse=True)
+        
+        # Simple opponent adaptation
+        self.opponent_stubbornness = 0.5  # Will adjust based on behavior
     
     def offer(self, o: list[int] | None) -> list[int] | None:
         """Main negotiation method - returns None to accept, else counter-offer"""
         self.moves_left -= 1
+        self.offer_count += 1
         
-        # Analyze opponent's offer if received
-        if o is not None:
-            # Track opponent's offer
-            self.opponent_offers.append(o)
-            
-            # Calculate offered value
-            offered_value = sum(o[i] * self.values[i] for i in range(self.n))
-            
-            # Update best opponent offer
-            if self.best_opponent_offer is None or offered_value > sum(
-                self.best_opponent_offer[i] * self.values[i] for i in range(self.n)
-            ):
-                self.best_opponent_offer = o
-            
-            # Estimate opponent's valuation based on their behavior
-            self._estimate_opponent_valuation()
-            
-            # Calculate dynamic target based on progress
-            progress = 1 - (self.moves_left / self.total_moves)
-            target = self._calculate_target(progress)
-            
-            # Accept if offer meets or exceeds target
-            if offered_value >= target:
-                return None
+        # First move - make initial offer
+        if o is None:
+            return self._build_offer(self.target)
+        
+        # Calculate value of opponent's offer
+        offered_value = sum(o[i] * self.values[i] for i in range(self.n))
+        
+        # Update best offer tracking
+        if offered_value > self.best_offer_value:
+            self.best_offer_value = offered_value
+            self.best_offer = o
+        
+        # Calculate current acceptable threshold
+        # More aggressive as time runs out, but still reasonable
+        time_pressure = 1 - (self.moves_left / self.total_moves)
+        acceptable = self._calculate_acceptable_threshold(time_pressure)
+        
+        # Accept if offer meets our current threshold
+        if offered_value >= acceptable:
+            return None
+        
+        # Opponent rejected our last offer - adapt strategy
+        if self.offer_count > 1:
+            # If opponent keeps rejecting good offers, they're stubborn
+            if offered_value > self.target * 0.8:
+                self.opponent_stubbornness = min(1.0, self.opponent_stubbornness + 0.1)
         
         # Make counter-offer
-        counter_offer = self._make_counter_offer()
-        return counter_offer
+        return self._build_offer(self._calculate_next_target(time_pressure))
     
-    def _estimate_opponent_valuation(self):
-        """Estimate opponent's valuation from their offers"""
-        if len(self.opponent_offers) < 2:
-            return
-        
-        # Look at what opponent keeps vs. gives
-        # Assume opponent keeps what they don't offer
-        opponent_keeps = []
-        for offer in self.opponent_offers:
-            keep = [self.counts[i] - offer[i] for i in range(self.n)]
-            opponent_keeps.append(keep)
-        
-        # Estimate based on consistency
-        if len(opponent_keeps) >= 2:
-            # Take the most common keep pattern as indicator
-            # Calculate average keep pattern
-            avg_keep = [0] * self.n
-            for keep in opponent_keeps:
-                for i in range(self.n):
-                    avg_keep[i] += keep[i]
-            for i in range(self.n):
-                avg_keep[i] /= len(opponent_keeps)
-            
-            # Opponent likely values items they consistently keep
-            keep_value = sum(avg_keep[i] * self.values[i] for i in range(self.n))
-            if self.opponent_estimated_value is None:
-                self.opponent_estimated_value = keep_value
-            else:
-                # Smooth update
-                self.opponent_estimated_value = 0.7 * self.opponent_estimated_value + 0.3 * keep_value
+    def _calculate_acceptable_threshold(self, time_pressure: float) -> float:
+        """Calculate minimum value we'll accept based on time pressure"""
+        # Base threshold starts high and decreases with time
+        base_threshold = self.target * (1 - time_pressure * 0.3)  # Only 30% reduction over time
+        return max(self.minimum, base_threshold)
     
-    def _calculate_target(self, progress: float) -> float:
-        """Calculate our target value based on negotiation progress and opponent behavior"""
-        # Base target with linear concession
-        target = self.initial_target - (
-            (self.initial_target - self.min_acceptable) * progress
-        )
+    def _calculate_next_target(self, time_pressure: float) -> float:
+        """Calculate our next offer target"""
+        # If opponent made a reasonable offer, move towards it
+        if self.best_offer_value > self.target * 0.8:
+            # Meet in the middle with opponent's best offer
+            return (self.target + self.best_offer_value) / 2
         
-        # Adjust based on opponent's best offer
-        if self.best_opponent_offer is not None:
-            best_offer_value = sum(
-                self.best_opponent_offer[i] * self.values[i] for i in range(self.n)
-            )
-            
-            # If opponent made a good offer, accept it sooner
-            if best_offer_value >= target * 0.95:
-                # Lower our target slightly to facilitate agreement
-                target = target * 0.95
-        
-        # Time pressure: sharper concessions near the end
-        if progress > 0.75:
-            target = target * 0.90
-        
-        return target
+        # Otherwise, concede based on time but not too much
+        concession = time_pressure * (self.target - self.minimum) * 0.5  # Only 50% of potential concession
+        return max(self.minimum, self.target - concession)
     
-    def _make_counter_offer(self) -> list[int]:
-        """Construct a strategic counter-offer"""
-        progress = 1 - (self.moves_left / self.total_moves)
-        target = self._calculate_target(progress)
-        
-        # Build offer prioritizing high-value items
+    def _build_offer(self, target_value: float) -> list[int]:
+        """Build an offer that meets target value efficiently"""
         offer = [0] * self.n
         remaining = self.counts[:]
         current_value = 0
         
-        # First pass: take high-value items to reach target
+        # Prioritize items that give best value per unit
         for i in self.item_priority:
-            if remaining[i] > 0 and current_value < target:
-                if self.values[i] > 0:
-                    needed = target - current_value
-                    take = min(remaining[i], max(1, (needed // self.values[i]) + 1))
+            if remaining[i] > 0 and current_value < target_value:
+                item_value = self.values[i]
+                if item_value > 0:
+                    # Take enough to reach target efficiently
+                    needed = target_value - current_value
+                    take = min(remaining[i], max(1, int(needed / item_value) + 1))
                 else:
                     take = 0
+                
                 take = min(take, remaining[i])
                 offer[i] = take
                 remaining[i] -= take
-                current_value += take * self.values[i]
+                current_value += take * item_value
         
-        # Strategic concession: leave room for negotiation
-        # Don't be too greedy, especially if time is running out
-        if progress > 0.5 and current_value > self.total_value * 0.65:
-            # Reduce demand slightly to improve acceptance probability
-            excess = current_value - (self.total_value * 0.60)
-            if excess > 0:
-                # Remove least valuable items
-                for i in reversed(self.item_priority):
-                    if offer[i] > 0 and self.values[i] > 0:
-                        remove = min(offer[i], min(1, int(excess / self.values[i]) + 1))
-                        offer[i] -= remove
-                        remaining[i] += remove
-                        excess -= remove * self.values[i]
-                        if excess <= 0:
-                            break
-        
-        # Final check: ensure offer is valid
-        total_taken = sum(offer)
-        total_available = sum(self.counts)
-        if total_taken > total_available:
-            # Scale back
-            scale = total_available / total_taken
-            offer = [int(x * scale) for x in offer]
+        # If we haven't reached target, take remaining items (including zero-value ones)
+        if current_value < target_value:
+            for i in range(self.n):
+                if remaining[i] > 0:
+                    offer[i] = remaining[i]
+                    remaining[i] = 0
         
         return offer

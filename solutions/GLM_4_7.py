@@ -5,64 +5,79 @@ class Agent:
         self.counts = counts
         self.values = values
         self.num_types = len(counts)
-        self.total_turns = max_rounds * 2
+        self.max_rounds = max_rounds
+        self.me = me
+        self.total_turns = max_rounds  # Number of our turns
         self.turns_left = self.total_turns
+        self.turn = 0
         
-        # Calculate total value for me
+        # Calculate total value for us
         self.total_value = sum(c * v for c, v in zip(counts, values))
         
-        # Initialize opponent model: uniform distribution normalized to total_value
-        # We know the opponent's total value equals ours.
+        # Initialize opponent model: uniform distribution
         if sum(counts) > 0:
             self.opp_values = [float(self.total_value) / sum(counts) for _ in range(self.num_types)]
         else:
             self.opp_values = [0.0] * self.num_types
+            
+        # Track opponent's offers for better inference
+        self.opp_offers = []
 
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turns_left -= 1
+        self.turn += 1
         
         # Process opponent's offer
         if o is not None:
             my_val = sum(self.values[i] * o[i] for i in range(self.num_types))
+            self.opp_offers.append(o[:])
             self._update_model(o)
             
-            # Last turn: Accept anything positive (0 is better than disagreement)
+            # Last turn: accept anything positive (better than disagreement)
             if self.turns_left == 0:
-                return None if my_val > 0 else None
+                return None if my_val > 0 else self.counts[:]
             
-            # Acceptance criterion:
-            # Accept if the offer is better than or equal to what we expect to get 
-            # if we continue to the next round.
-            future_target = self._get_target(self.turns_left - 1)
-            
-            # Small tolerance (1%) to encourage agreement and reduce friction
-            if my_val >= future_target * 0.99:
+            # Check if we should accept based on value and timing
+            if self._should_accept(o, my_val):
                 return None
         
         # Generate counter-offer
-        target_val = self._get_target(self.turns_left)
-        return self._generate_offer(target_val)
+        return self._generate_offer()
 
-    def _get_target(self, turns: int) -> float:
-        """
-        Calculate target value based on remaining turns.
-        Strategy: Start high (~95%) and decay to ~20%.
-        Uses a square root curve to hold firm longer.
-        """
-        if turns < 0:
-            turns = 0
-            
-        time_left = turns / self.total_turns
-        # Interpolate between 0.20 and 0.95
-        target_ratio = 0.20 + 0.75 * (time_left ** 0.5)
-        return self.total_value * target_ratio
+    def _should_accept(self, o: list[int], my_val: float) -> bool:
+        """Determine whether to accept the opponent's offer."""
+        # Accept if we get at least half (fair split)
+        if my_val >= self.total_value / 2:
+            return True
+        
+        # Calculate opponent's estimated value from the offer
+        opp_gets = [self.counts[i] - o[i] for i in range(self.num_types)]
+        opp_val = sum(self.opp_values[i] * opp_gets[i] for i in range(self.num_types))
+        
+        # Accept if opponent is getting a very good deal (they might walk away)
+        if opp_val >= self.total_value * 0.7:
+            return True
+        
+        # Time pressure: lower standards as deadline approaches
+        time_pressure = 1 - (self.turns_left / self.total_turns)
+        
+        # Minimum acceptable ratio: starts at 45%, goes to 40%
+        min_accept = 0.45 - 0.05 * time_pressure
+        
+        if my_val >= self.total_value * min_accept:
+            return True
+        
+        return False
 
-    def _generate_offer(self, target_val: float) -> list[int]:
-        """
-        Generates a Pareto-efficient offer.
-        We maximize the opponent's value subject to us getting at least target_val.
-        This is done by giving away items with the highest (Opponent Value / My Value) ratio.
-        """
+    def _generate_offer(self) -> list[int]:
+        """Generate a Pareto-efficient counter-offer targeting our desired value."""
+        time_pressure = 1 - (self.turns_left / self.total_turns)
+        
+        # Target ratio: starts at 65%, decays to 50%
+        target_ratio = 0.65 - 0.15 * time_pressure
+        target_val = self.total_value * target_ratio
+        
+        # Start with all items
         offer = self.counts[:]
         current_val = self.total_value
         
@@ -70,23 +85,23 @@ class Agent:
             return offer
         
         # Calculate efficiency scores: (Opponent Value) / (My Value)
-        # Higher score = Better to give to opponent (low cost to me, high gain to them)
+        # Higher efficiency = better to give to opponent (low cost to us, high value to them)
         items = []
         for i in range(self.num_types):
             my_v = self.values[i]
             opp_v = self.opp_values[i]
             
             if my_v == 0:
-                eff = float('inf') # Free to give
+                eff = float('inf')  # Free to give
             else:
                 eff = opp_v / my_v if opp_v > 0 else 0
                 
             items.append((eff, i))
             
-        # Sort by efficiency descending (give away best items first)
+        # Sort by efficiency descending (give away most efficient first)
         items.sort(key=lambda x: x[0], reverse=True)
         
-        # Greedily give items to meet target
+        # Greedily give items to meet target value
         for eff, i in items:
             if current_val <= target_val:
                 break
@@ -99,9 +114,11 @@ class Agent:
             max_shed = self.counts[i] * self.values[i]
             
             if max_shed <= to_shed:
+                # Give all of this item type
                 offer[i] = 0
                 current_val -= max_shed
             else:
+                # Give only what we need to shed
                 count_needed = math.ceil(to_shed / self.values[i])
                 offer[i] -= count_needed
                 current_val -= count_needed * self.values[i]
@@ -109,21 +126,19 @@ class Agent:
         return offer
 
     def _update_model(self, offer: list[int]):
-        """
-        Update opponent value estimates.
-        If opponent kept an item, increase its estimated value.
-        If opponent gave an item, decrease its estimated value.
-        """
-        learning_rate = 0.5
+        """Update opponent value estimates based on their offer pattern."""
+        learning_rate = 0.3
         
         for i in range(self.num_types):
             kept = self.counts[i] - offer[i]
             given = offer[i]
             
+            # If opponent kept more of item X, increase its estimated value
             if kept > given:
-                self.opp_values[i] *= (1 + learning_rate * 0.1)
+                self.opp_values[i] *= (1 + learning_rate * 0.15)
+            # If opponent gave away more of item X, decrease its estimated value
             elif given > kept:
-                self.opp_values[i] *= (1 - learning_rate * 0.1)
+                self.opp_values[i] *= (1 - learning_rate * 0.15)
         
         # Renormalize to maintain total value constraint
         curr_total = sum(self.opp_values[i] * self.counts[i] for i in range(self.num_types))

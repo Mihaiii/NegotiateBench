@@ -25,7 +25,12 @@ class Agent:
             for i in range(self.n):
                 s = sum((self.counts[i] - h[i]) / self.counts[i] for h in self.history)
                 avg_prop[i] = s / num_h
-            self.opp_val = [avg_prop[i] * (self.total / self.total_items) for i in range(self.n)]
+            raw_val = [avg_prop[i] * (self.total / self.total_items) for i in range(self.n)]
+            opp_total = sum(self.counts[i] * raw_val[i] for i in range(self.n))
+            if opp_total > 0:
+                self.opp_val = [raw_val[i] * self.total / opp_total for i in range(self.n)]
+            else:
+                self.opp_val = [0.0] * self.n
         # Urgency
         remaining_rounds = max(1, self.max_rounds - self.turn_num + 1)
         urgency = 1.0 - remaining_rounds / self.max_rounds
@@ -35,21 +40,19 @@ class Agent:
             thresh = self.total * max(0.05, 0.8 - 0.7 * urgency)
             if my_val_o >= thresh or (urgency >= 0.9 and my_val_o > 0):
                 return None
-        # First offer
-        if self.turn_num == 1 and o is None:
-            return [self.counts[i] if self.values[i] > 0 else 0 for i in range(self.n)]
-        # Enumerate best offer
-        opp_min = self.total * max(0.05, 0.6 - 0.5 * urgency)
+        # Enumerate best offer using score
+        gamma = 0.2 + 1.8 * urgency
         best_offer = None
-        best_my_val = -1.0
+        best_score = -1.0
         def gen(pos: int, current: list[int]):
-            nonlocal best_offer, best_my_val
+            nonlocal best_offer, best_score
             if pos == self.n:
                 my_v = self.value(current, self.values)
                 opp_share = [self.counts[i] - current[i] for i in range(self.n)]
                 opp_v = self.value(opp_share, self.opp_val)
-                if opp_v >= opp_min and my_v > best_my_val:
-                    best_my_val = my_v
+                score = my_v + gamma * opp_v
+                if score > best_score:
+                    best_score = score
                     best_offer = current[:]
                 return
             for k in range(self.counts[pos] + 1):
@@ -58,7 +61,4 @@ class Agent:
             current[pos] = 0
         current = [0] * self.n
         gen(0, current)
-        if best_offer is not None:
-            return best_offer
-        # Fallback to greedy
-        return [self.counts[i] if self.values[i] > 0 else 0 for i in range(self.n)]
+        return best_offer

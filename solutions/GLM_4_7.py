@@ -5,137 +5,128 @@ class Agent:
         self.counts = counts
         self.values = values
         self.num_types = len(counts)
-        self.max_rounds = max_rounds
-        self.turn = 0
+        self.total_turns = max_rounds * 2
+        self.turns_left = self.total_turns
         
+        # Calculate total value for me
         self.total_value = sum(c * v for c, v in zip(counts, values))
         
-        # Opponent value model - uniform prior
-        self.opp_values = [1.0] * self.num_types
-        
-        # Track offers
-        self.my_offers = []
-        self.opp_offers = []
-        self.best_opp_value = 0
-        
-        # Track value to ensure monotonic concessions
-        self.last_offer_value = None
-        
+        # Initialize opponent model: uniform distribution normalized to total_value
+        # We know the opponent's total value equals ours.
+        if sum(counts) > 0:
+            self.opp_values = [float(self.total_value) / sum(counts) for _ in range(self.num_types)]
+        else:
+            self.opp_values = [0.0] * self.num_types
+
     def offer(self, o: list[int] | None) -> list[int] | None:
-        self.turn += 1
-        turns_left = self.max_rounds * 2 - self.turn
-        round_num = (self.turn - 1) // 2
+        self.turns_left -= 1
         
         # Process opponent's offer
         if o is not None:
-            self.opp_offers.append(o)
-            self._update_opp_model(o)
-            
             my_val = sum(self.values[i] * o[i] for i in range(self.num_types))
-            self.best_opp_value = max(self.best_opp_value, my_val)
+            self._update_model(o)
             
-            if self._should_accept(o, my_val, turns_left, round_num):
+            # Last turn: Accept anything positive (0 is better than disagreement)
+            if self.turns_left == 0:
+                return None if my_val > 0 else None
+            
+            # Acceptance criterion:
+            # Accept if the offer is better than or equal to what we expect to get 
+            # if we continue to the next round.
+            future_target = self._get_target(self.turns_left - 1)
+            
+            # Small tolerance (1%) to encourage agreement and reduce friction
+            if my_val >= future_target * 0.99:
                 return None
         
         # Generate counter-offer
-        new_offer = self._make_offer(round_num)
-        offer_val = sum(self.values[i] * new_offer[i] for i in range(self.num_types))
+        target_val = self._get_target(self.turns_left)
+        return self._generate_offer(target_val)
+
+    def _get_target(self, turns: int) -> float:
+        """
+        Calculate target value based on remaining turns.
+        Strategy: Start high (~95%) and decay to ~20%.
+        Uses a square root curve to hold firm longer.
+        """
+        if turns < 0:
+            turns = 0
+            
+        time_left = turns / self.total_turns
+        # Interpolate between 0.20 and 0.95
+        target_ratio = 0.20 + 0.75 * (time_left ** 0.5)
+        return self.total_value * target_ratio
+
+    def _generate_offer(self, target_val: float) -> list[int]:
+        """
+        Generates a Pareto-efficient offer.
+        We maximize the opponent's value subject to us getting at least target_val.
+        This is done by giving away items with the highest (Opponent Value / My Value) ratio.
+        """
+        offer = self.counts[:]
+        current_val = self.total_value
         
-        # Ensure monotonic concession
-        if self.last_offer_value is not None and offer_val > self.last_offer_value:
-            new_offer = self.my_offers[-1] if self.my_offers else new_offer
+        if current_val <= target_val:
+            return offer
         
-        self.last_offer_value = sum(self.values[i] * new_offer[i] for i in range(self.num_types))
-        self.my_offers.append(new_offer)
-        return new_offer
-    
-    def _should_accept(self, offer: list[int], my_val: float, turns_left: int, round_num: int) -> bool:
-        # Last turn: accept anything positive
-        if turns_left == 0:
-            return my_val > 0
+        # Calculate efficiency scores: (Opponent Value) / (My Value)
+        # Higher score = Better to give to opponent (low cost to me, high gain to them)
+        items = []
+        for i in range(self.num_types):
+            my_v = self.values[i]
+            opp_v = self.opp_values[i]
+            
+            if my_v == 0:
+                eff = float('inf') # Free to give
+            else:
+                eff = opp_v / my_v if opp_v > 0 else 0
+                
+            items.append((eff, i))
+            
+        # Sort by efficiency descending (give away best items first)
+        items.sort(key=lambda x: x[0], reverse=True)
         
-        progress = round_num / self.max_rounds
+        # Greedily give items to meet target
+        for eff, i in items:
+            if current_val <= target_val:
+                break
+                
+            if self.values[i] == 0:
+                offer[i] = 0
+                continue
+            
+            to_shed = current_val - target_val
+            max_shed = self.counts[i] * self.values[i]
+            
+            if max_shed <= to_shed:
+                offer[i] = 0
+                current_val -= max_shed
+            else:
+                count_needed = math.ceil(to_shed / self.values[i])
+                offer[i] -= count_needed
+                current_val -= count_needed * self.values[i]
+                
+        return offer
+
+    def _update_model(self, offer: list[int]):
+        """
+        Update opponent value estimates.
+        If opponent kept an item, increase its estimated value.
+        If opponent gave an item, decrease its estimated value.
+        """
+        learning_rate = 0.5
         
-        # Progressive acceptance threshold: 55% -> 10%
-        min_val = self.total_value * (0.55 - 0.45 * progress)
-        
-        if my_val >= min_val:
-            return True
-        
-        # Fairness check: accept if both parties get reasonable amounts
-        opp_val = sum(self.opp_values[i] * (self.counts[i] - offer[i]) for i in range(self.num_types))
-        if progress > 0.4 and my_val >= self.total_value * 0.4 and opp_val >= self.total_value * 0.4:
-            return True
-        
-        return False
-    
-    def _update_opp_model(self, offer: list[int]):
-        """Update opponent value estimates with stable learning."""
         for i in range(self.num_types):
             kept = self.counts[i] - offer[i]
             given = offer[i]
             
-            # Small learning rate for stability
             if kept > given:
-                self.opp_values[i] *= 1.05
+                self.opp_values[i] *= (1 + learning_rate * 0.1)
             elif given > kept:
-                self.opp_values[i] *= 0.95
+                self.opp_values[i] *= (1 - learning_rate * 0.1)
         
-        # Normalize to maintain total value
-        total = sum(self.opp_values[i] * self.counts[i] for i in range(self.num_types))
-        if total > 0:
-            factor = self.total_value / total
+        # Renormalize to maintain total value constraint
+        curr_total = sum(self.opp_values[i] * self.counts[i] for i in range(self.num_types))
+        if curr_total > 0:
+            factor = self.total_value / curr_total
             self.opp_values = [v * factor for v in self.opp_values]
-    
-    def _make_offer(self, round_num: int) -> list[int]:
-        """Generate counter-offer with steady concessions."""
-        
-        # Calculate target value
-        if self.my_offers:
-            prev_val = self.last_offer_value if self.last_offer_value else sum(self.values[i] * self.my_offers[-1][i] for i in range(self.num_types))
-            
-            # Gradual concession: 3% to 8% based on progress
-            concession_rate = 0.03 + 0.05 * (round_num / self.max_rounds)
-            target_val = prev_val * (1 - concession_rate)
-        else:
-            # Reasonable initial offer: 70%
-            target_val = self.total_value * 0.70
-        
-        # Don't concede too far below opponent's best offer
-        if self.best_opp_value > 0:
-            target_val = max(target_val, self.best_opp_value * 1.03)
-        
-        # Minimum floor
-        target_val = max(target_val, self.total_value * 0.35)
-        
-        # Rank items by trade efficiency (my value / opponent value)
-        items = []
-        for i in range(self.num_types):
-            if self.values[i] == 0:
-                eff = -1
-            elif self.opp_values[i] < 0.001:
-                eff = float('inf')
-            else:
-                eff = self.values[i] / self.opp_values[i]
-            items.append((eff, i))
-        
-        items.sort(key=lambda x: x[0], reverse=True)
-        
-        # Build offer greedily
-        offer = [0] * self.num_types
-        current_val = 0
-        
-        for eff, idx in items:
-            if current_val >= target_val:
-                break
-            
-            if self.values[idx] == 0:
-                continue
-            
-            needed = target_val - current_val
-            take = min(self.counts[idx], math.ceil(needed / self.values[idx]))
-            
-            offer[idx] = take
-            current_val += take * self.values[idx]
-        
-        return offer

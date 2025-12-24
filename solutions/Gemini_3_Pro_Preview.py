@@ -2,56 +2,59 @@ import random
 
 class Agent:
     def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
+        # 'me' is 0 (Player 1) or 1 (Player 2)
         self.me = me
         self.counts = counts
         self.values = values
         self.rounds = max_rounds
         self.total_turns = max_rounds * 2
-        # current_turn tracks the global turn index (0, 1, 2...)
-        # me=0 moves on turns 0, 2, 4...; me=1 moves on turns 1, 3, 5...
-        self.current_turn = me
+        # Track the global turn index: 0, 1, 2, ...
+        self.current_turn = me 
         self.total_value = sum(c * v for c, v in zip(counts, values))
         
-        # Track cumulative count of items kept by opponent in their offers to infer their preferences.
+        # Preferencing Model: Track how many items opponent consistently keeps
+        # to infer their valuation and build efficient offers.
         self.opp_kept = [0] * len(counts)
 
     def offer(self, o: list[int] | None) -> list[int] | None:
         if o is not None:
-            # Update opponent model: what they didn't give me, they kept.
-            for i, quantity_given in enumerate(o):
-                kept_qty = self.counts[i] - quantity_given
+            # 1. Update Opponent Model
+            # If they offered me X, they kept (Total - X).
+            for i, offered_qty in enumerate(o):
+                kept_qty = self.counts[i] - offered_qty
                 self.opp_kept[i] += kept_qty
-            
-            # Calculate the value of the offer to me
+
+            # 2. Evaluate Offer
             val_offered = sum(q * v for q, v in zip(o, self.values))
             
-            # --- Panic Strategy (Player 2 only) ---
-            # If I am Player 2 and this is the absolute last turn of the game, 
-            # I must accept any non-zero value to avoid the "walking away" (0-0) outcome.
-            if self.me == 1 and self.current_turn >= self.total_turns - 1:
+            # --- Panic Strategy (Player 2, Final Turn) ---
+            # If I am Player 2 and this is the absolute last turn, a rejection/counter
+            # means no agreement (score 0). I must accept anything > 0.
+            if self.me == 1 and self.current_turn == self.total_turns - 1:
                 if val_offered > 0:
                     return None
             
-            # --- Standard Acceptance Logic ---
+            # --- Standard Acceptance ---
             target = self._get_target_value()
             if val_offered >= target:
                 return None
 
-        # --- Construct Counter-Offer ---
+        # --- Generate Counter-Offer ---
         
-        # Determine aspiration level for this turn
+        # Re-evaluate target as we are now active (making a demand)
         target = self._get_target_value()
         
-        # --- Gambit Strategy (Player 1 only) ---
-        # If I am Player 1 and this is my last chance to speak (second-to-last turn),
-        # I aim high but ensure I leave a "crumb" for Player 2 to panic-accept in the final turn.
-        is_gambit = (self.me == 0 and self.current_turn >= self.total_turns - 2)
+        # --- Gambit Strategy (Player 1, Penultimate Turn) ---
+        # If I am P1 on my last move, P2 will face a "take it or leave it" decision next.
+        # I demand maximum value (essentially everything), relying on _build_proposal 
+        # to leave a single high-value "crumb" for P2 to incentivize acceptance.
+        is_gambit = (self.me == 0 and self.current_turn == self.total_turns - 2)
         if is_gambit:
             target = self.total_value
 
-        proposal = self._build_proposal(target, is_gambit)
+        proposal = self._build_proposal(target)
         
-        # Increment turn counter for next interaction (my turn + opponent's turn = 2 steps)
+        # Advance turn counter (my turn + opponent's turn = 2 interactions processed)
         self.current_turn += 2
         
         return proposal
@@ -60,44 +63,44 @@ class Agent:
         if self.total_turns == 0:
             return 0
         
-        # Normalized progress from 0.0 (start) to 1.0 (end)
+        # Normalized time progress: 0.0 (start) -> 1.0 (end)
         progress = self.current_turn / max(1, self.total_turns - 1)
         
-        # Concession Curve Strategy:
-        # 0.0 - 0.5: Hold 100% (Signal strength phase)
-        # 0.5 - 0.9: Drop linearly to 70% (Negotiation phase)
-        # 0.9 - 1.0: Drop steeply to 50% (Agreement phase)
+        # Concession Curve:
+        # 0.00 - 0.20: Hold firm at 100% (Signal strength)
+        # 0.20 - 0.80: Linear concession to 60% (Negotiation zone)
+        # 0.80 - 1.00: Drop to 55% (Agreement zone - close to fair split)
         
-        if progress < 0.5:
+        if progress < 0.2:
             factor = 1.0
-        elif progress < 0.9:
-            # Map range 0.5..0.9 to factor 1.0..0.7
-            slope = (0.7 - 1.0) / (0.9 - 0.5) 
-            factor = 1.0 + slope * (progress - 0.5)
+        elif progress < 0.8:
+            slope = (0.6 - 1.0) / (0.8 - 0.2)
+            factor = 1.0 + slope * (progress - 0.2)
         else:
-            # Map range 0.9..1.0 to factor 0.7..0.5
-            slope = (0.5 - 0.7) / (1.0 - 0.9)
-            factor = 0.7 + slope * (progress - 0.9)
+            slope = (0.55 - 0.6) / (1.0 - 0.8)
+            factor = 0.6 + slope * (progress - 0.8)
             
         target = int(self.total_value * factor)
-        # Always try to get at least 1, unless total value is really 0.
+        # Ensure we always ask for at least something if total value is positive
         return max(1, target) if self.total_value > 0 else 0
 
-    def _build_proposal(self, target: int, is_gambit: bool) -> list[int]:
-        # Heuristic: Sort items by "Efficiency" = My Value / (1 + Opponent Interest)
-        # Opponent Interest is inferred from how many times they kept the item.
-        # This prioritizes asking for items I want but they (seemingly) care less about.
-        
+    def _build_proposal(self, target: int) -> list[int]:
+        """
+        Builds a proposal trying to meet 'target' value for self, 
+        prioritizing items the opponent seemingly values less.
+        """
+        # Heuristic: Priority = My Value / (1 + Opponent Interest)
+        # Low opponent interest implies the item is cheap for them to concede.
         priorities = []
         for i, val in enumerate(self.values):
             if val == 0:
-                p = -1.0 # Never request worthless items for ourselves
+                p = -1.0 # Do not ask for worthless items (give to opponent)
             else:
-                # Add small random noise to break ties and prevent loops
+                # Add small noise to avoid deterministic loops and break ties
                 p = val / (1.0 + self.opp_kept[i]) + random.uniform(0, 1e-5)
             priorities.append((p, i))
         
-        # Sort descending by priority
+        # Sort desc (Best items for me first)
         priorities.sort(key=lambda x: x[0], reverse=True)
         
         proposal = [0] * len(self.counts)
@@ -111,30 +114,25 @@ class Agent:
             if needed <= 0:
                 break
             
-            # Take as many items of type 'i' as needed/available
-            amount_needed = (needed + self.values[i] - 1) // self.values[i] # ceiling division
-            amount_to_take = min(amount_needed, self.counts[i])
+            # Calculate quantity needed to close the value gap (ceiling division)
+            count_needed = (needed + self.values[i] - 1) // self.values[i]
+            to_take = min(count_needed, self.counts[i])
             
-            proposal[i] += amount_to_take
-            current_val += amount_to_take * self.values[i]
+            proposal[i] += to_take
+            current_val += to_take * self.values[i]
             
-        # Gambit Logic Adjustment
-        if is_gambit:
-            # If we took EVERYTHING, the opponent gets nothing and might reject (resulting in 0-0).
-            # We must verify we left something on the table.
-            
-            # Check if any items are left for opponent
-            # Opponent receives: self.counts[i] - proposal[i]
-            anything_left = any(proposal[i] < self.counts[i] for i in range(len(self.counts)))
-            
-            if not anything_left:
-                # We took 100% of items. Give one back.
-                # To minimize loss, give back the item with the lowest priority to us 
-                # (which implies high opponent interest relative to our value).
-                # Iterating 'priorities' in reverse gives us the "worst" items we decided to keep.
-                for p, i in reversed(priorities):
-                    if p >= 0 and proposal[i] > 0:
-                        proposal[i] -= 1
-                        break
-                        
+        # Validity Check: Ensure opponent isn't left with 0 items.
+        # This is critical if we went Full Greedy (Gambit) or if target ~= total.
+        opponent_has_items = any(proposal[i] < self.counts[i] for i in range(len(self.counts)))
+        
+        if not opponent_has_items:
+            # We took 100% of physical items.
+            # Give back the "least efficient" item we took.
+            # (The one with lowest priority score for us, implying high opponent interest).
+            # Iterate reversed (lowest priority first).
+            for p, i in reversed(priorities):
+                if p >= 0 and proposal[i] > 0:
+                    proposal[i] -= 1
+                    break
+                    
         return proposal

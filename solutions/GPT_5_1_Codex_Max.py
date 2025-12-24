@@ -4,9 +4,11 @@ from typing import List, Optional
 class Agent:
     """
     GPT 5.1 Codex Max – refined negotiation bot.
-    - Enumerates feasible splits to search jointly good offers.
-    - Learns opponent inclination from their keeps/gives to shape concessions.
-    - Ambitious start, smooth concession, pragmatic late acceptance / salvage.
+    Strategy:
+    - Pre‑enumerate all partitions when feasible; otherwise fall back to greedy heuristics.
+    - Start ambitious, then soften smoothly; late game prioritises feasibility.
+    - Learn opponent inclinations from their keeps/gives and bias offers toward mutually good splits.
+    - Pragmatic acceptance rules to avoid deadlocks and salvage value on the last own turn.
     """
 
     def __init__(self, me: int, counts: List[int], values: List[int], max_rounds: int):
@@ -14,16 +16,16 @@ class Agent:
         self.counts = counts
         self.values = values
         self.n = len(counts)
-        self.max_rounds = max_rounds
+        self.max_rounds = max_rounds  # my turns count
         self.turn = 0
 
         self.total_value = sum(c * v for c, v in zip(counts, values))
         self.total_items = sum(counts)
 
-        # Opponent value prior: uniform per item (at least 1)
+        # Opponent value prior: uniform per item (>=0.5 to avoid zero div)
         avg_item = self.total_value / self.total_items if self.total_items else 0
-        base = max(1.0, round(avg_item))
-        self.opp_w = [base for _ in range(self.n)]
+        base = max(0.5, round(avg_item))
+        self.opp_w = [float(base) for _ in range(self.n)]
 
         # Tracking
         self.best_seen = 0
@@ -38,9 +40,9 @@ class Agent:
         space = 1
         for c in counts:
             space *= (c + 1)
-            if space > 300_000:
+            if space > 200_000:
                 break
-        if space <= 300_000 and self.total_value > 0:
+        if space <= 200_000 and self.total_value > 0:
             self.candidates = []
             self._enumerate(0, [0] * self.n)
             # sort by my value desc, then opp est desc
@@ -82,17 +84,17 @@ class Agent:
     def _accept_threshold(self, last_turn: bool) -> float:
         if self.total_value == 0:
             return 0.0
-        # Decline from 0.95 to 0.45; extra softness on final own turn
-        start, end = 0.95, 0.45
+        # Decline from 0.90 to 0.40; extra softness on final own turn
+        start, end = 0.90, 0.40
         prog = self._progress()
         th = self.total_value * (start - (start - end) * prog)
         if last_turn:
-            th = min(th, self.total_value * 0.35)
+            th = min(th, self.total_value * 0.30)
         return th
 
     def _target_value(self) -> float:
         # Ambitious to moderate over time, with stall-based reduction
-        high, low = 1.00, 0.55
+        high, low = 1.00, 0.60
         prog = self._progress()
         t = self.total_value * (high - (high - low) * prog)
         t -= 0.05 * self.stall * self.total_value
@@ -115,7 +117,7 @@ class Agent:
 
     def _select_offer(self, target: float, forbid: Optional[List[int]]) -> List[int]:
         prog = self._progress()
-        w_my = 0.85 - 0.25 * prog  # from 0.85 down to ~0.60
+        w_my = 0.90 - 0.35 * prog  # from 0.90 down to ~0.55
         chosen = None
         best_score = -1.0
 
@@ -150,7 +152,7 @@ class Agent:
         for i in zero_indices:
             while offer[i] > 0 and cur_val >= target:
                 offer[i] -= 1
-        cur_val = self._value(offer)
+                cur_val -= self.values[i]
         # Now concede cheapest per opp weight
         ratio_order = sorted(order, key=lambda i: (self.values[i] / (self.opp_w[i] + 0.5), self.values[i]))
         for i in ratio_order:
@@ -211,11 +213,8 @@ class Agent:
             if self._progress() > 0.75:
                 if incoming_val >= max(self.best_seen * 0.95, self.total_value * 0.50):
                     return None
-                if incoming_val >= self._target_value() * 0.94 and self._opp_estimate(o) > 0:
+                if incoming_val >= self._target_value() * 0.95 and self._opp_estimate(o) > 0:
                     return None
-            if last_turn and incoming_val > 0:
-                # If this is truly the last word, better something than nothing
-                return None
 
         # Build counter-offer
         target = self._target_value()

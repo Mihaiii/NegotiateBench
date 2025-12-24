@@ -8,68 +8,80 @@ class Agent:
         self.turn = 0
         self.n = len(counts)
         self.opponent_offers = []
-        self.best_offer_received = None
-        self.best_offer_value = 0
+        self.my_offers = []
         
     def _value(self, offer: list[int]) -> int:
         return sum(o * v for o, v in zip(offer, self.values))
     
-    def _opponent_gets(self, offer: list[int]) -> list[int]:
-        return [self.counts[i] - offer[i] for i in range(self.n)]
-    
-    def _infer_opponent_values(self) -> list[float]:
-        """Infer opponent values based on what they consistently want to keep."""
-        if len(self.opponent_offers) < 2:
-            # Start with assumption: inverse correlation with our values
-            return [1.0 / (v + 0.5) for v in self.values]
-        
-        # Score how much opponent wants each item type (higher = wants more)
-        scores = [0.0] * self.n
-        for offer in self.opponent_offers:
-            opp_keeps = self._opponent_gets(offer)
-            for i in range(self.n):
-                if self.counts[i] > 0:
-                    scores[i] += opp_keeps[i] / self.counts[i]
-        
-        # Normalize to sum to total (assume same total value)
-        total_score = sum(scores) + 0.001
-        return [s / total_score * self.total / max(1, self.counts[i]) 
-                for i, s in enumerate(scores)]
-    
-    def _score_for_opponent(self, offer: list[int], opp_vals: list[float]) -> float:
-        opp_gets = self._opponent_gets(offer)
-        return sum(opp_gets[i] * opp_vals[i] * self.counts[i] for i in range(self.n))
+    def _opponent_gets(self, my_offer: list[int]) -> list[int]:
+        return [self.counts[i] - my_offer[i] for i in range(self.n)]
     
     def _generate_all_offers(self) -> list[list[int]]:
-        """Generate all possible offers."""
         offers = []
         def gen(idx, current):
             if idx == self.n:
-                offers.append(list(current))
+                offers.append(tuple(current))
                 return
             for c in range(self.counts[idx] + 1):
                 current.append(c)
                 gen(idx + 1, current)
                 current.pop()
         gen(0, [])
-        return offers
+        return [list(o) for o in offers]
     
-    def _find_pareto_optimal_offer(self, min_value: int, progress: float) -> list[int]:
-        """Find offer that maximizes opponent value while meeting our minimum."""
+    def _estimate_opponent_values(self) -> list[float]:
+        """Estimate opponent values from their offers (what they give us = low value to them)."""
+        if not self.opponent_offers:
+            # Assume inverse of our values initially
+            inv = [1.0 / (v + 1) for v in self.values]
+            s = sum(inv)
+            return [x / s * self.total for x in inv]
+        
+        # What opponent offers us consistently = low value to them
+        # What opponent keeps = high value to them
+        weights = [0.0] * self.n
+        for offer in self.opponent_offers:
+            opp_keeps = self._opponent_gets(offer)
+            for i in range(self.n):
+                if self.counts[i] > 0:
+                    weights[i] += opp_keeps[i]
+        
+        # Normalize
+        total_w = sum(weights) + 0.001
+        estimated = [w / total_w * self.total for w in weights]
+        
+        # Per-item values
+        per_item = []
+        for i in range(self.n):
+            if self.counts[i] > 0:
+                per_item.append(estimated[i] / self.counts[i])
+            else:
+                per_item.append(0)
+        return per_item
+    
+    def _opponent_value(self, my_offer: list[int], opp_vals: list[float]) -> float:
+        opp_gets = self._opponent_gets(my_offer)
+        return sum(opp_gets[i] * opp_vals[i] for i in range(self.n))
+    
+    def _find_best_offer(self, min_my_value: int) -> list[int]:
+        """Find offer maximizing estimated opponent value while meeting our minimum."""
         all_offers = self._generate_all_offers()
-        opp_vals = self._infer_opponent_values()
+        opp_vals = self._estimate_opponent_values()
         
-        # Filter offers meeting our minimum
-        valid = [(off, self._value(off), self._score_for_opponent(off, opp_vals)) 
-                 for off in all_offers if self._value(off) >= min_value]
+        candidates = []
+        for off in all_offers:
+            my_val = self._value(off)
+            if my_val >= min_my_value:
+                opp_val = self._opponent_value(off, opp_vals)
+                candidates.append((off, my_val, opp_val))
         
-        if not valid:
-            # Return best offer for us
+        if not candidates:
+            # Just get max for us
             return max(all_offers, key=lambda x: self._value(x))
         
-        # Sort by opponent value (descending), then our value (descending)
-        valid.sort(key=lambda x: (x[2], x[1]), reverse=True)
-        return valid[0][0]
+        # Prioritize opponent value, then our value
+        candidates.sort(key=lambda x: (x[2], x[1]), reverse=True)
+        return candidates[0][0]
     
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn += 1
@@ -81,45 +93,36 @@ class Agent:
             self.opponent_offers.append(o)
             offer_val = self._value(o)
             
-            # Track best offer
-            if offer_val > self.best_offer_value:
-                self.best_offer_value = offer_val
-                self.best_offer_received = o
-            
-            # Acceptance logic
-            # Last turn: accept anything positive
+            # Final turn - accept if positive
             if remaining == 0:
-                return None if offer_val > 0 else self._find_pareto_optimal_offer(1, 1.0)
+                return None if offer_val > 0 else [self.counts[i] if self.values[i] > 0 else 0 for i in range(self.n)]
             
-            # Dynamic threshold based on progress
-            if progress < 0.3:
-                threshold = self.total * 0.45
-            elif progress < 0.6:
-                threshold = self.total * 0.35
-            elif progress < 0.85:
-                threshold = self.total * 0.25
-            else:
-                threshold = self.total * 0.15
+            # Adaptive acceptance threshold
+            base_threshold = 0.5
+            # Decrease threshold as we progress
+            threshold = self.total * max(0.1, base_threshold - progress * 0.45)
             
-            # Accept if meets threshold
             if offer_val >= threshold:
                 return None
             
-            # Near end: accept best offer we've seen if reasonable
-            if progress > 0.8 and self.best_offer_value >= self.total * 0.2:
-                if offer_val >= self.best_offer_value * 0.9:
-                    return None
+            # Accept good offers late in negotiation
+            if progress > 0.7 and offer_val >= self.total * 0.25:
+                return None
         
-        # Generate counter-offer
-        # Start ambitious, become more generous
-        if progress < 0.25:
-            target = self.total * 0.55
-        elif progress < 0.5:
-            target = self.total * 0.45
-        elif progress < 0.75:
-            target = self.total * 0.35
+        # Counter-offer strategy
+        # Start high, concede gradually
+        if progress < 0.2:
+            target = self.total * 0.6
+        elif progress < 0.4:
+            target = self.total * 0.5
+        elif progress < 0.6:
+            target = self.total * 0.4
+        elif progress < 0.8:
+            target = self.total * 0.3
         else:
-            target = self.total * 0.25
+            target = self.total * 0.2
         
         target = max(1, int(target))
-        return self._find_pareto_optimal_offer(target, progress)
+        new_offer = self._find_best_offer(target)
+        self.my_offers.append(new_offer)
+        return new_offer

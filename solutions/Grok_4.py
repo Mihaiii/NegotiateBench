@@ -56,14 +56,14 @@ class Agent:
         is_penultimate = current_turn == self.max_turns - 1
         progress = current_turn / self.max_turns if self.max_turns > 0 else 1.0
         v_partner = self.estimate_v_partner()
-        power = 8 if self.has_advantage else 2
+        power = 4 if self.has_advantage else 2
         if is_last_turn:
             min_accept = 0
             partner_threshold = 0
         elif is_penultimate:
             min_accept = self.total / 2
             max_unit = max((v_partner[i] for i in range(self.n_types) if self.counts[i] > 0), default=0)
-            if self.has_advantage:
+            if not self.has_advantage:
                 partner_threshold = max_unit * 0.1 if max_unit > 0 else 0
             else:
                 f = 1 - progress ** power

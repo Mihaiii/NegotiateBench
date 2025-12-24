@@ -15,5 +15,3 @@ models:
     openrouter_name: z-ai/glm-4.7
   - display_name: Top Human - Robert Speed
     is_human: true
-  - display_name: Top Human - Asta
-    is_human: true

@@ -10,7 +10,7 @@ class Agent:
         self.max_turns = 2 * max_rounds
         self.my_turn_number = 0
         self.partner_offers = []
-        self.has_advantage = (self.max_turns % 2 == 0 and self.me == 1) or (self.max_turns % 2 == 1 and self.me == 0)
+        self.has_advantage = (self.max_turns % 2 == 0 and self.me == 0) or (self.max_turns % 2 == 1 and self.me == 1)
 
     def value(self, o: list[int]) -> float:
         return sum(o[i] * self.values[i] for i in range(self.n_types))
@@ -63,7 +63,7 @@ class Agent:
         elif is_penultimate:
             min_accept = self.total / 2
             max_unit = max((v_partner[i] for i in range(self.n_types) if self.counts[i] > 0), default=0)
-            if not self.has_advantage:
+            if self.has_advantage:
                 partner_threshold = max_unit * 0.1 if max_unit > 0 else 0
             else:
                 f = 1 - progress ** power

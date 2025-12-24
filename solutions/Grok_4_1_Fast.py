@@ -12,18 +12,20 @@ class Agent:
     def my_value(self, share: list[int] | list[float]) -> float:
         return sum(self.values[i] * share[i] for i in range(self.n))
 
-    def offer(self, o: list[int] | list[float] | None) -> list[int] | None:
+    def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn += 1
-        progress = 0.0 if self.max_rounds <= 1 else max(0.0, min(1.0, (self.turn - 1) / (self.max_rounds - 1)))
+        progress = min(1.0, self.turn / (self.max_rounds + 1.0))
 
-        opp_self = None
+        my_val = 0.0
+        if o is not None:
+            my_val = self.my_value(o)
+            accept_thresh = 0.65 + 0.25 * (1 - progress)
+            if my_val >= accept_thresh * self.total:
+                return None
+
         if o is not None:
             opp_self = [self.counts[i] - o[i] for i in range(self.n)]
             self.opp_history.append(opp_self)
-            my_val = self.my_value(o)
-            accept_thresh = 0.55 + 0.35 * (1 - progress)
-            if my_val >= accept_thresh * self.total:
-                return None
 
         # Estimate opp_val
         if self.opp_history:
@@ -34,48 +36,43 @@ class Agent:
             avg_frac = [0.5] * self.n
         sum_weight = sum(avg_frac[j] * self.counts[j] for j in range(self.n))
         if sum_weight <= 0:
-            avg_frac = [1.0 / self.n] * self.n
+            avg_frac = [0.5] * self.n
             sum_weight = sum(avg_frac[j] * self.counts[j] for j in range(self.n))
         self.opp_val = [avg_frac[i] * self.total / sum_weight for i in range(self.n)]
 
         # Late game desperate accept
         if o is not None:
-            my_val = self.my_value(o)
-            if self.turn > self.max_rounds - 2 or self.turn >= self.max_rounds * 0.8:
-                if my_val >= 0.25 * self.total:
-                    return None
-            if self.turn == self.max_rounds and self.me == 1 and my_val > 0:
+            if progress > 0.6 and my_val >= 0.45 * self.total:
+                return None
+            if progress > 0.85 and my_val >= 0.25 * self.total:
+                return None
+            if self.turn > self.max_rounds * 1.2 and my_val > 0.01 * self.total:
                 return None
 
-        # Target: opp_concede_frac for opponent's share
-        opp_concede_frac = 0.1 + 0.5 * progress
-        opp_budget = self.total * (1 - opp_concede_frac)
-
-        # Greedy knapsack by density myv / oppv
-        keep_score = [self.values[i] / max(self.opp_val[i], 1e-6) for i in range(self.n)]
-        type_order = sorted(range(self.n), key=lambda i: -keep_score[i])
-        prop = [0.0] * self.n
-        remaining_budget = opp_budget
+        # Compute proposal: greedy give opp cheap items first
+        opp_frac = 0.25 + 0.55 * progress
+        opp_budget = opp_frac * self.total
+        density = [self.values[i] / max(self.opp_val[i], 1e-10) if self.opp_val[i] > 1e-10 else (float('inf') if self.values[i] > 0 else 0.0) for i in range(self.n)]
+        type_order = sorted(range(self.n), key=lambda k: density[k])
+        opp_share = [0] * self.n
+        remaining = opp_budget
         for i in type_order:
-            o_i = self.opp_val[i]
-            c_i = self.counts[i]
-            if remaining_budget <= 0:
+            if remaining < 1e-6:
                 break
-            if o_i < 1e-9:
-                prop[i] = c_i
+            ov = self.opp_val[i]
+            if ov < 1e-9:
                 continue
-            max_k = min(c_i, int(remaining_budget / o_i))
-            prop[i] = max_k
-            remaining_budget -= max_k * o_i
+            ci = self.counts[i]
+            k_frac = remaining / ov
+            k = min(ci, k_frac)
+            opp_share[i] = max(0, min(ci, int(round(k))))
+            remaining -= opp_share[i] * ov
 
-        # Clamp and round
-        prop = [min(self.counts[i], max(0, int(round(prop[i])))) for i in range(self.n)]
+        prop = [self.counts[i] - opp_share[i] for i in range(self.n)]
 
-        # If prop worse than o, accept
         if o is not None:
             prop_val = self.my_value(prop)
-            o_val = self.my_value(o)
-            if prop_val <= o_val:
+            if prop_val + 1e-6 < my_val:
                 return None
 
         return prop

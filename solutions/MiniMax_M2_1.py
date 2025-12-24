@@ -4,106 +4,137 @@ class Agent:
         self.counts = counts
         self.values = values
         self.n = len(counts)
+        self.rounds = max_rounds
         
         # Total value calculation
         self.total_value = sum(counts[i] * values[i] for i in range(self.n))
         self.total_moves = max_rounds * 2
         self.moves_left = self.total_moves
         
-        # Sort items by value (descending)
-        self.sorted_indices = sorted(range(self.n), key=lambda i: values[i], reverse=True)
+        # Track negotiation progress
+        self.is_first = (me == 0)
+        self.round_number = 1
+        self.offer_count = 0
         
         # Track opponent behavior
+        self.opponent_offers = []
+        self.opponent_responses = []  # True if accepted, False if rejected
         self.best_offer_received = None
         self.best_offer_value = -1
-        self.opponent_accepted_my_offer = False
-        self.my_offer_history = []
         
-        # Track if I'm the first player
-        self.is_first = (me == 0)
+        # Strategic parameters
+        self.initial_demand_ratio = 0.65  # Start by demanding 65% of value
+        self.min_acceptable_ratio = 0.48   # Minimum we'll accept
+        self.concession_rate = 0.05        # How much to concede per round
+        
+        # Item prioritization
+        self.item_values = list(zip(range(self.n), values, counts))
+        self.sorted_indices = sorted(range(self.n), key=lambda i: values[i], reverse=True)
         
     def offer(self, o: list[int] | None) -> list[int] | None:
-        """
-        Called when it's my turn to act.
-        o: The offer from the partner (what they give to me), or None if it's my opening.
-        Returns: None to accept, or a list representing what I want for myself.
-        """
+        """Main negotiation method - returns None to accept, else counter-offer"""
         self.moves_left -= 1
         progress = 1 - (self.moves_left / self.total_moves)
         
-        # If I received an offer, analyze it
+        # Analyze opponent's offer if received
         if o is not None:
             offered_value = sum(o[i] * self.values[i] for i in range(self.n))
             
-            # Update tracking of best offer received
+            # Track opponent behavior
+            self.opponent_offers.append((o[:], offered_value))
             if offered_value > self.best_offer_value:
                 self.best_offer_value = offered_value
                 self.best_offer_received = o[:]
             
-            # Dynamic acceptance threshold
-            # Start high (55%) and decrease gradually, but never below 45%
-            min_acceptable = self.total_value * (0.55 - 0.1 * progress)
-            min_acceptable = max(min_acceptable, self.total_value * 0.45)
+            # Calculate dynamic acceptance threshold
+            accept_threshold = self._calculate_acceptance_threshold(progress, offered_value)
             
-            # Check if opponent is conceding (offer is better than before)
-            improving = False
-            if len(self.my_offer_history) > 0:
-                last_offer_value = self._calculate_value(self.my_offer_history[-1])
-                if offered_value > last_offer_value:
-                    improving = True
-            
-            # Accept if offer meets threshold OR opponent is improving significantly
-            if offered_value >= min_acceptable or (improving and offered_value >= min_acceptable * 0.95):
+            # Accept if offer meets or exceeds threshold
+            if offered_value >= accept_threshold:
                 return None
             
-            # Special case: last move - accept if offer is reasonable
+            # On last move, be more willing to accept
             if self.moves_left <= 1:
-                if offered_value >= self.total_value * 0.40:
-                    return None
-                # On last move, make one final offer
-                if self.moves_left == 0:
+                if offered_value >= self.total_value * self.min_acceptable_ratio:
                     return None
         
         # Make a counter-offer
-        # Calculate my target value based on progress
-        target = self.total_value * (0.60 - 0.10 * progress)
-        target = max(target, self.total_value * 0.50)
+        counter_offer = self._make_counter_offer(progress)
+        self.offer_count += 1
         
-        # Build the offer
-        my_offer = self._build_counter_offer(target)
-        self.my_offer_history.append(my_offer)
+        return counter_offer
+    
+    def _calculate_acceptance_threshold(self, progress: float, current_offer_value: float) -> float:
+        """Calculate the minimum value we'll accept based on negotiation progress"""
+        # Base threshold decreases over time
+        base_threshold = self.total_value * (
+            self.initial_demand_ratio - (self.initial_demand_ratio - self.min_acceptable_ratio) * progress
+        )
         
-        return my_offer
+        # If opponent is making concessions, be more willing to accept
+        if len(self.opponent_offers) >= 2:
+            last_offer = self.opponent_offers[-1][1]
+            prev_offer = self.opponent_offers[-2][1]
+            if last_offer > prev_offer:
+                # Opponent is conceding - slightly lower our threshold
+                base_threshold *= 0.98
+        
+        # If we're getting our best offer yet, consider accepting
+        if current_offer_value == self.best_offer_value and self.best_offer_value > 0:
+            if len(self.opponent_offers) >= 3:
+                # Recent offers are improving
+                recent_trend = [
+                    self.opponent_offers[i][1] for i in range(-3, 0)
+                ]
+                if recent_trend[-1] > recent_trend[0]:
+                    base_threshold *= 0.97
+        
+        return base_threshold
     
-    def _calculate_value(self, offer: list[int]) -> float:
-        """Calculate the value of an offer to me"""
-        return sum(offer[i] * self.values[i] for i in range(self.n))
-    
-    def _build_counter_offer(self, target_value: float) -> list[int]:
-        """
-        Constructs a counter-offer targeting a specific value.
-        Uses a strategic approach to maximize value while being acceptable.
-        """
+    def _make_counter_offer(self, progress: float) -> list[int]:
+        """Construct a strategic counter-offer"""
+        # Calculate our target value based on progress
+        target_ratio = self.initial_demand_ratio - (self.initial_demand_ratio - self.min_acceptable_ratio) * progress
+        target_value = self.total_value * target_ratio
+        
+        # Build offer starting with most valuable items
         offer = [0] * self.n
         remaining = self.counts[:]
         current_value = 0
         
-        # First pass: take the most valuable items first
+        # First pass: take items until we reach or exceed target
         for i in self.sorted_indices:
-            if remaining[i] > 0:
-                take = min(remaining[i], 1)
+            if remaining[i] > 0 and current_value < target_value:
+                # Take as many as needed of this item type
+                needed = target_value - current_value
+                if self.values[i] > 0:
+                    take = min(remaining[i], (needed // self.values[i]) + 1)
+                else:
+                    take = 0
+                take = min(take, remaining[i])
                 offer[i] = take
                 remaining[i] -= take
                 current_value += take * self.values[i]
         
-        # Second pass: if needed, take more items to reach target
+        # If we still haven't reached target, take remaining valuable items
         if current_value < target_value:
             for i in self.sorted_indices:
-                while remaining[i] > 0 and current_value < target_value:
-                    offer[i] += 1
-                    remaining[i] -= 1
-                    current_value += self.values[i]
+                if remaining[i] > 0 and self.values[i] > 0:
+                    take = min(remaining[i], 1)  # Take one at a time
+                    offer[i] += take
+                    remaining[i] -= take
+                    current_value += take * self.values[i]
+                    if current_value >= target_value:
+                        break
         
-        # Final adjustment: ensure the offer is valid
-        # This gives partner what's left: [counts[i] - offer[i] for i in range(self.n)]
+        # Strategic adjustment: if we're asking for too much (>80% of value),
+        # reduce slightly to make it more acceptable
+        if current_value > self.total_value * 0.80:
+            # Give back least valuable items
+            for i in self.sorted_indices[::-1]:  # Least valuable first
+                if offer[i] > 0 and self.values[i] == min(self.values[i] for i in range(self.n)):
+                    offer[i] -= 1
+                    remaining[i] += 1
+                    break
+        
         return offer

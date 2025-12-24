@@ -143,8 +143,8 @@ def get():
                 Td(r["rank"]),
                 Td(r["model_name"]),
                 Td(f'{r["profit_percentage"]:.2f}%'),
-                Td(f'{r["max_possible_profit"]:.2f}'),
-                Td(f'{r["total_profit"]:.2f}'),
+                Td(f'{r["max_possible_profit"]:.0f}'),
+                Td(f'{r["total_profit"]:.0f}'),
                 Td(A("link", href=r["code_link"], target="_blank")) if r.get("code_link") else Td(""),
             )
             for r in rows

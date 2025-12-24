@@ -18,95 +18,78 @@ class Agent:
             self.opponent_offers.append(o)
             offer_value = sum(o_i * v_i for o_i, v_i in zip(o, self.values))
             
-            # Acceptance thresholds based on negotiation stage
-            if turns_remaining == 0:
-                # Last chance - accept anything > 0
-                if offer_value > 0:
-                    return None
-            elif turns_remaining <= 2:
-                # Very late game - accept 40% or more
-                if offer_value >= self.total_value * 0.4:
-                    return None
-            elif turns_remaining <= 4:
-                # Late game - accept 50% or more  
-                if offer_value >= self.total_value * 0.5:
-                    return None
-            elif turns_remaining <= 8:
-                # Mid game - accept 60% or more
-                if offer_value >= self.total_value * 0.6:
-                    return None
-            else:
-                # Early game - accept 70% or more
-                if offer_value >= self.total_value * 0.7:
-                    return None
+            # Accept offer if it meets our minimum threshold
+            if offer_value >= self.total_value * 0.5:
+                return None
+            
+            # In very late game, accept lower thresholds
+            if turns_remaining <= 2 and offer_value >= self.total_value * 0.3:
+                return None
+            if turns_remaining == 0 and offer_value > 0:
+                return None
         
-        # Calculate target share based on how much time is left
-        # More aggressive early, more generous late
-        progress = self.turn_count / total_turns
-        if progress < 0.25:
-            target_share = 0.75  # Very aggressive early
-        elif progress < 0.5:
-            target_share = 0.65  # Still aggressive
-        elif progress < 0.75:
-            target_share = 0.55  # Moderate
+        # Calculate minimum acceptable value based on remaining time
+        if turns_remaining <= 2:
+            min_value = self.total_value * 0.4
+        elif turns_remaining <= 6:
+            min_value = self.total_value * 0.5
         else:
-            target_share = 0.45  # Generous in late game
+            min_value = self.total_value * 0.6
         
-        target_value = self.total_value * target_share
-        
-        # Create base offer by taking highest value items first
+        # Build offer by prioritizing high-value items
         offer = [0] * len(self.counts)
         current_value = 0
         
-        # Sort items by our value per item (descending)
-        item_indices = sorted(range(len(self.values)), key=lambda i: self.values[i], reverse=True)
+        # Create list of (value_per_item, index) and sort by value descending
+        valuable_items = []
+        for i in range(len(self.values)):
+            if self.values[i] > 0:
+                valuable_items.append((self.values[i], i))
         
-        for i in item_indices:
-            if self.values[i] == 0:
-                continue
-            if current_value >= target_value:
+        # Sort by value per item (descending)
+        valuable_items.sort(reverse=True)
+        
+        # Take as many high-value items as needed to reach min_value
+        for value_per_item, idx in valuable_items:
+            if current_value >= min_value:
                 break
-            needed_value = target_value - current_value
-            items_needed = min(self.counts[i], (needed_value + self.values[i] - 1) // self.values[i])
-            offer[i] = int(items_needed)
-            current_value += offer[i] * self.values[i]
+            # Calculate how many of this item we need
+            needed_value = min_value - current_value
+            max_items = self.counts[idx]
+            items_to_take = min(max_items, (needed_value + value_per_item - 1) // value_per_item)
+            offer[idx] = int(items_to_take)
+            current_value += offer[idx] * value_per_item
         
-        # Apply strategic concessions based on opponent's recent behavior
+        # If we haven't reached min_value, take more items
+        if current_value < min_value:
+            for value_per_item, idx in valuable_items:
+                while offer[idx] < self.counts[idx] and current_value < min_value:
+                    offer[idx] += 1
+                    current_value += value_per_item
+        
+        # Apply strategic concessions based on opponent behavior
         if self.opponent_offers:
-            last_opponent_offer = self.opponent_offers[-1]
-            # The opponent is keeping (counts[i] - last_opponent_offer[i]) for themselves
-            # We should be more willing to concede items where opponent is demanding a lot
-            
-            # Calculate how much opponent wants each item (what they're NOT offering us)
-            opponent_demands = [self.counts[i] - last_opponent_offer[i] for i in range(len(self.counts))]
-            
-            # Make additional concessions on items that opponent highly demands
-            # but that have lower value to us
-            concession_items = []
+            last_offer = self.opponent_offers[-1]
+            # If opponent is consistently not offering us certain items,
+            # and those items have low value to us, consider reducing our demand
             for i in range(len(self.values)):
-                if opponent_demands[i] > 0 and offer[i] > 0:
-                    # Priority: high opponent demand + low our value
-                    priority = opponent_demands[i] * (1.0 / (self.values[i] + 1))  # Avoid division by zero
-                    concession_items.append((priority, i))
-            
-            # Sort by priority (highest priority first)
-            concession_items.sort(reverse=True)
-            
-            # Make one strategic concession if we're not being too generous already
-            if current_value > target_value * 0.8 and concession_items:
-                for _, item_idx in concession_items[:2]:  # Try top 2 items
-                    if offer[item_idx] > 0:
-                        offer[item_idx] = max(0, offer[item_idx] - 1)
-                        break
+                if self.values[i] > 0 and offer[i] > 0:
+                    # If opponent never offers us this item (they keep it all)
+                    if last_offer[i] == 0:
+                        # Only concede if this item has relatively low value to us
+                        if self.values[i] <= self.total_value / sum(self.counts):
+                            offer[i] = max(0, offer[i] - 1)
+                            break
         
         # Ensure offer is valid
         for i in range(len(offer)):
-            offer[i] = min(offer[i], self.counts[i])
-            offer[i] = max(0, offer[i])
+            offer[i] = max(0, min(offer[i], self.counts[i]))
         
-        # Safety check: if we're asking for nothing, take at least one valuable item
-        if sum(offer) == 0:
-            best_item = max(range(len(self.values)), key=lambda i: self.values[i])
-            offer[best_item] = min(1, self.counts[best_item])
+        # Safety check: never offer nothing if we have valuable items
+        if sum(offer[i] * self.values[i] for i in range(len(offer))) == 0:
+            # Find the most valuable item and take at least one
+            best_idx = max(range(len(self.values)), key=lambda i: self.values[i])
+            if self.values[best_idx] > 0:
+                offer[best_idx] = min(1, self.counts[best_idx])
         
         return offer

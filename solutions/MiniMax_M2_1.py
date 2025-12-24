@@ -3,104 +3,89 @@ class Agent:
         self.me = me
         self.counts = counts
         self.values = values
-        self.max_rounds = max_rounds
-        self.rounds_left = max_rounds
-        self.total_value = sum(counts[i] * values[i] for i in range(len(counts)))
-        self.sorted_indices = sorted(range(len(counts)), key=lambda i: -values[i])
-        self.best_offer_value = 0
-        self.best_offer = None
-        self.offers_received = []
+        self.n = len(counts)
+        # Total value of all items to me
+        self.total_value = sum(counts[i] * values[i] for i in range(self.n))
+        # Total number of turns (2 per round)
+        self.total_moves = max_rounds * 2
+        self.moves_left = self.total_moves
+        
+        # Sort item indices by my value in descending order
+        self.sorted_indices = sorted(range(self.n), key=lambda i: values[i], reverse=True)
         
     def offer(self, o: list[int] | None) -> list[int] | None:
-        self.rounds_left -= 1
+        """
+        Called when it's my turn to act.
+        o: The offer from the partner (what they give to me), or None if it's my opening.
+        Returns: None to accept, or a list representing what I want for myself.
+        """
+        self.moves_left -= 1
+        progress = 1 - (self.moves_left / self.total_moves)
         
-        # First turn: make strategic opening
-        if o is None:
-            return self._build_counter_offer(self.total_value * 0.52)
-        
-        # Track best offer received
-        offered_value = sum(o[i] * self.values[i] for i in range(len(o)))
-        if offered_value > self.best_offer_value:
-            self.best_offer_value = offered_value
-            self.best_offer = o
-        self.offers_received.append(o)
-        
-        # Accept if offer meets minimum threshold
-        min_acceptable = self._get_min_acceptable()
-        if offered_value >= min_acceptable:
-            return None
+        # If I received an offer, evaluate it
+        if o is not None:
+            offered_value = sum(o[i] * self.values[i] for i in range(self.n))
             
-        # Last round: accept any positive offer
-        if self.rounds_left == 0:
-            return None
+            # Acceptance Threshold:
+            # Starts at 50% and gradually decreases to 40% as time runs out
+            min_acceptable = self.total_value * (0.5 - 0.1 * progress)
             
-        # Calculate target value for counter-offer
-        # Concede more as rounds progress, but stay above minimum
-        progress = 1 - (self.rounds_left / self.max_rounds)
-        target = self.total_value * (0.5 + 0.05 * (1 - progress))
-        target = max(target, min_acceptable + 1)
+            # If the offer is good enough, ACCEPT
+            if offered_value >= min_acceptable:
+                return None
+            
+            # Special case: Last resort on the final turn. 
+            # If I reject now and make an offer, the partner might reject and we get 0.
+            # So if this is my last possible turn (moves_left == 1) and offer > 0, accept.
+            # Note: moves_left == 1 means this is my last turn.
+            # If I am second player, my last turn is when moves_left == 1.
+            # If I am first player, my last turn is when moves_left == 1.
+            # Actually, if moves_left == 1, it's my turn. After I play, moves_left becomes 0.
+            # Partner plays last.
+            # If I return an offer on my last turn, partner decides.
+            # If I return None, deal is done.
+            # So yes, if moves_left == 1 and offer is reasonable, accept.
+            if self.moves_left == 1 and offered_value > 0:
+                return None
+
+        # If I reach here, I am making a counter-offer (or opening)
         
-        # Adapt based on partner's behavior
-        if len(self.offers_received) >= 2:
-            partner_concession = self._analyze_partner_concession()
-            if partner_concession > 0:
-                # Partner is conceding, match their pace
-                target = min(target + partner_concession * self.total_value * 0.02, 
-                           self.total_value * 0.48)
+        # My Target Value:
+        # I aim for ~55% initially and concede to ~50% at the very end.
+        # This creates a bargaining zone where I ask for more than 50% 
+        # but accept down to 40-50%.
+        target = self.total_value * (0.55 - 0.05 * progress)
         
+        # Build the offer
         return self._build_counter_offer(target)
-    
-    def _get_min_acceptable(self) -> float:
-        """Calculate minimum acceptable value based on remaining time."""
-        progress = 1 - (self.rounds_left / self.max_rounds)
-        # Minimum starts at 50% and gradually decreases to 40% by end
-        return self.total_value * (0.5 - 0.1 * progress)
-    
-    def _analyze_partner_concession(self) -> float:
-        """Analyze how much partner has conceded from their opening."""
-        if len(self.offers_received) < 2:
-            return 0
-            
-        first_offer = self.offers_received[0]
-        last_offer = self.offers_received[-1]
-        
-        first_value = sum(first_offer[i] * self.values[i] for i in range(len(first_offer)))
-        last_value = sum(last_offer[i] * self.values[i] for i in range(len(last_offer)))
-        
-        if first_value > last_value:
-            return (first_value - last_value) / self.total_value
-        return 0
-    
+
     def _build_counter_offer(self, target_value: float) -> list[int]:
-        """Build counter-offer targeting specific value."""
-        counter = [0] * len(self.counts)
+        """
+        Constructs a counter-offer that gives me at least 'target_value'.
+        Uses a greedy algorithm prioritizing highest value items.
+        """
+        offer = [0] * self.n
         remaining = self.counts[:]
         current_value = 0
         
-        # First pass: take highest-value items
-        for i in self.sorted_indices:
-            if remaining[i] > 0 and self.values[i] > 0:
-                take = min(remaining[i], 1)
-                counter[i] = take
-                remaining[i] -= take
-                current_value += take * self.values[i]
-        
-        # Second pass: strategically add items to reach target
-        for i in self.sorted_indices:
-            if remaining[i] > 0 and current_value < target_value:
-                item_value = self.values[i]
-                if item_value > 0:
-                    needed = max(0, int((target_value - current_value + item_value - 1) / item_value))
-                    take = min(remaining[i], needed)
-                    if take > 0:
-                        counter[i] = take
-                        remaining[i] -= take
-                        current_value += take * item_value
-        
-        # Add one more item to make deal attractive if we have room
+        # First pass: Take the highest value items one by one
         for i in self.sorted_indices:
             if remaining[i] > 0:
-                counter[i] += 1
-                break
+                take = min(remaining[i], 1)
+                offer[i] = take
+                remaining[i] -= take
+                current_value += take * self.values[i]
+                
+        # Second pass: If we haven't reached the target, take more of the remaining items
+        # (preferring high value, but we might need to take multiple of a type)
+        if current_value < target_value:
+            for i in self.sorted_indices:
+                while remaining[i] > 0 and current_value < target_value:
+                    # Take one more of this item
+                    offer[i] += 1
+                    remaining[i] -= 1
+                    current_value += self.values[i]
         
-        return counter
+        # Final adjustment: Ensure we offer a valid partition.
+        # The partner gets 'counts - offer'.
+        return offer

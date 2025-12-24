@@ -7,7 +7,7 @@ class Agent:
         self.me = me
         self.turn = 0
         self.their_offers = []
-        self.last_my_offer = None
+        self.my_offers = []
         
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn += 1
@@ -22,7 +22,7 @@ class Agent:
                 return None
         
         new_offer = self._make_offer(turns_left, total_turns)
-        self.last_my_offer = new_offer
+        self.my_offers.append(new_offer)
         return new_offer
     
     def _should_accept(self, offered_value: int, turns_left: int) -> bool:
@@ -36,101 +36,100 @@ class Agent:
         if turns_left <= 1:
             return offered_value > 0
         
-        # Detect deadlock - if they keep making same offer, compromise
-        if len(self.their_offers) >= 4:
-            recent = self.their_offers[-4:]
-            if all(off == recent[0] for off in recent):
-                # Deadlock detected - accept if reasonable
-                if turns_left <= 8 and value_ratio >= 0.25:
-                    return True
-                if turns_left <= 4 and value_ratio >= 0.20:
-                    return True
+        # Second to last turn - be very lenient
+        if turns_left == 2:
+            return value_ratio >= 0.20
         
-        # Time-based acceptance thresholds with aggressive late-game
-        if turns_left <= 2:
-            return value_ratio >= 0.15
-        elif turns_left <= 4:
+        # Detect if opponent is being stubborn (same offer 3+ times)
+        if len(self.their_offers) >= 3:
+            recent = self.their_offers[-3:]
+            if all(off == recent[0] for off in recent):
+                # They're stuck - accept if reasonable given time left
+                if turns_left <= 6:
+                    return value_ratio >= 0.30
+                elif turns_left <= 12:
+                    return value_ratio >= 0.35
+        
+        # Progressive acceptance thresholds
+        if turns_left <= 3:
             return value_ratio >= 0.25
         elif turns_left <= 6:
-            return value_ratio >= 0.33
+            return value_ratio >= 0.35
         elif turns_left <= 10:
-            return value_ratio >= 0.40
+            return value_ratio >= 0.42
         elif turns_left <= 16:
-            return value_ratio >= 0.45
+            return value_ratio >= 0.47
         else:
-            return value_ratio >= 0.50
+            return value_ratio >= 0.52
     
     def _make_offer(self, turns_left: int, total_turns: int) -> list[int]:
-        """Generate offer with progressive concessions."""
+        """Generate offer with strategic concessions."""
         
-        # Calculate target value ratio with smooth concessions
-        progress = (total_turns - turns_left) / total_turns
-        
-        # Start at 65%, linearly decrease to 30% by the end
-        target_ratio = 0.65 - (progress * 0.35)
-        
-        # Accelerate concessions in final turns
-        if turns_left <= 4:
-            target_ratio = max(0.30, target_ratio - 0.05 * (4 - turns_left))
-        
-        # Estimate opponent values
+        # Estimate opponent values from their behavior
         opp_values = self._estimate_opponent_values()
         
-        # Create offer optimizing for Nash product (fairness)
-        return self._create_nash_offer(target_ratio, opp_values)
+        # Calculate target value based on time pressure
+        progress = (total_turns - turns_left) / total_turns
+        
+        # Start aggressive (70%), concede to fair (50%), then to survival (35%)
+        if turns_left <= 3:
+            target_ratio = 0.35
+        elif turns_left <= 6:
+            target_ratio = 0.40
+        elif turns_left <= 10:
+            target_ratio = 0.45
+        else:
+            # Smooth decrease from 70% to 50%
+            target_ratio = 0.70 - progress * 0.20
+        
+        # Create efficient offer
+        return self._create_efficient_offer(target_ratio, opp_values)
     
     def _estimate_opponent_values(self) -> list[float]:
         """Estimate opponent's valuation from their offers."""
         n = len(self.counts)
         
-        if len(self.their_offers) < 2:
-            # Initial guess: assume complementary preferences
+        if not self.their_offers:
+            # No data - assume inverse of our values
             total = sum(self.values)
             if total == 0:
                 return [1.0] * n
-            # Inverse weighting as starting point
             return [(total - v) / max(total, 1) * self.total_value / n for v in self.values]
         
-        # Track what they consistently keep vs give
-        keep_ratios = [0.0] * n
-        weights_sum = 0.0
+        # Weight what they consistently keep vs give
+        keep_scores = [0.0] * n
         
         for idx, offer in enumerate(self.their_offers):
-            # Weight recent offers more heavily
-            weight = (idx + 1) ** 1.2
-            weights_sum += weight
+            # More recent offers are more informative
+            weight = (idx + 1) ** 1.5
             
             for i in range(n):
                 if self.counts[i] > 0:
                     they_keep = self.counts[i] - offer[i]
-                    keep_ratios[i] += (they_keep / self.counts[i]) * weight
+                    keep_scores[i] += (they_keep / self.counts[i]) * weight
         
-        # Normalize
-        if weights_sum > 0:
-            keep_ratios = [kr / weights_sum for kr in keep_ratios]
-        
-        # Convert to estimated values
-        total_ratio = sum(keep_ratios) + 0.001
-        estimated = [(ratio / total_ratio) * self.total_value for ratio in keep_ratios]
+        # Normalize to sum to total_value
+        total_score = sum(keep_scores) + 0.001
+        estimated = [(score / total_score) * self.total_value for score in keep_scores]
         
         return estimated
     
-    def _create_nash_offer(self, target_ratio: float, opp_values: list[float]) -> list[int]:
-        """Create offer that balances our value with opponent's likely value."""
+    def _create_efficient_offer(self, target_ratio: float, opp_values: list[float]) -> list[int]:
+        """Create offer maximizing our value while considering opponent."""
         n = len(self.counts)
         target_value = target_ratio * self.total_value
         
-        # Build list of all items with their value to us and estimated value to them
+        # Create items with efficiency scores
         items = []
         for i in range(n):
             for _ in range(self.counts[i]):
                 my_val = self.values[i]
-                their_val = max(opp_values[i], 0.01)
-                # Prefer items we value more relative to them
-                efficiency = my_val / their_val
+                their_est_val = max(opp_values[i], 0.01)
+                # Prioritize items where we have comparative advantage
+                efficiency = my_val / their_est_val if their_est_val > 0 else my_val * 100
                 items.append((i, efficiency, my_val))
         
-        # Sort by efficiency (take items we value more than they do)
+        # Sort by efficiency (prefer items we value more relative to opponent)
         items.sort(key=lambda x: (-x[1], -x[2]))
         
         # Greedy allocation
@@ -138,17 +137,20 @@ class Agent:
         current_value = 0
         
         for item_type, _, item_value in items:
-            offer[item_type] += 1
-            current_value += item_value
             if current_value >= target_value:
                 break
+            offer[item_type] += 1
+            current_value += item_value
         
-        # If we overshot or undershot, adjust
-        if current_value < target_value * 0.95:
-            # Add more high-value items
+        # If we're short, add our most valuable remaining items
+        if current_value < target_value * 0.9:
             for i in sorted(range(n), key=lambda x: -self.values[x]):
                 while offer[i] < self.counts[i] and current_value < target_value:
                     offer[i] += 1
                     current_value += self.values[i]
+        
+        # Ensure valid offer
+        for i in range(n):
+            offer[i] = min(offer[i], self.counts[i])
         
         return offer

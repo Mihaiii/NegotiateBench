@@ -25,7 +25,7 @@ class Agent:
         num_off = len(self.partner_offers)
         avg_taken = [0.0] * self.n_types
         sum_weights = 0.0
-        alpha = 0.9
+        alpha = 0.7
         for k in range(num_off):
             weight = alpha ** (num_off - 1 - k)
             o = self.partner_offers[k]
@@ -56,7 +56,7 @@ class Agent:
         is_penultimate = current_turn == self.max_turns - 1
         progress = current_turn / self.max_turns if self.max_turns > 0 else 1.0
         v_partner = self.estimate_v_partner()
-        power = 4 if self.has_advantage else 2
+        power = 5 if self.has_advantage else 2
         if is_last_turn:
             min_accept = 0
             partner_threshold = 0
@@ -82,28 +82,44 @@ class Agent:
                 return None
         m = [0] * self.n_types
         current_util = 0.0
-        for i in range(self.n_types):
-            if self.values[i] == 0:
-                m[i] = self.counts[i]
-                current_util += m[i] * v_partner[i]
-        candidates = [i for i in range(self.n_types) if self.values[i] > 0 and v_partner[i] > 0 and m[i] < self.counts[i]]
-        if candidates:
-            candidates.sort(key=lambda i: (-v_partner[i] / self.values[i], self.values[i]))
-        remaining_needed = partner_threshold - current_util
-        if remaining_needed > 0 and candidates:
-            for i in candidates:
-                util_per = v_partner[i]
-                max_give = self.counts[i] - m[i]
-                if remaining_needed <= 0:
-                    break
-                num_needed = math.ceil(remaining_needed / util_per)
-                num = min(num_needed, max_give)
-                m[i] += num
-                added = num * util_per
-                current_util += added
-                remaining_needed -= added
-        if current_util == 0 and candidates and not is_last_turn:
-            i = candidates[0]
-            m[i] += 1
+        if is_penultimate and self.has_advantage:
+            # Give all free items
+            for i in range(self.n_types):
+                if self.values[i] == 0:
+                    m[i] = self.counts[i]
+                    current_util += m[i] * v_partner[i]
+            # If still 0, give 1 of cheapest costly item with positive v_partner
+            if current_util == 0:
+                candidates = [i for i in range(self.n_types) if self.values[i] > 0 and v_partner[i] > 0 and self.counts[i] > 0]
+                if candidates:
+                    candidates.sort(key=lambda i: (self.values[i], -v_partner[i]))
+                    best = candidates[0]
+                    m[best] = 1
+                    current_util += v_partner[best]
+        else:
+            # Normal case
+            for i in range(self.n_types):
+                if self.values[i] == 0:
+                    m[i] = self.counts[i]
+                    current_util += m[i] * v_partner[i]
+            candidates = [i for i in range(self.n_types) if self.values[i] > 0 and v_partner[i] > 0 and m[i] < self.counts[i]]
+            if candidates:
+                candidates.sort(key=lambda i: (-v_partner[i] / self.values[i], self.values[i]))
+            remaining_needed = partner_threshold - current_util
+            if remaining_needed > 0 and candidates:
+                for i in candidates:
+                    util_per = v_partner[i]
+                    max_give = self.counts[i] - m[i]
+                    if remaining_needed <= 0:
+                        break
+                    num_needed = math.ceil(remaining_needed / util_per)
+                    num = min(num_needed, max_give)
+                    m[i] += num
+                    added = num * util_per
+                    current_util += added
+                    remaining_needed -= added
+            if current_util == 0 and candidates and not is_last_turn:
+                i = candidates[0]
+                m[i] += 1
         my_offer = [self.counts[i] - m[i] for i in range(self.n_types)]
         return my_offer

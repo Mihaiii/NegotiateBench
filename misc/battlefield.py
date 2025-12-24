@@ -371,7 +371,7 @@ def run_battles(
     Run negotiation battles between all pairs of models.
 
     Args:
-        models: List of model dicts with 'display_name' and 'openrouter_name'
+        models: List of model dicts with 'display_name' and optionally 'openrouter_name' or 'is_human'
         negotiation_data: List of negotiation scenarios with 'counts', 'player_0', 'player_1', 'rounds'
         num_samples: Maximum number of samples to store per model pair (default 5, can be set via NUM_SAMPLES env var)
 

@@ -137,10 +137,11 @@ def main():
     # Iterate through models and call OpenRouter
     for model in models.copy():
         # do not ask to regenerate code for the top model from the latest session
-        if model["display_name"] == top_model_name:
+        if model["display_name"] == top_model_name or model.get("is_human", False):
             continue
 
         display_name = model["display_name"]
+
         openrouter_name = model["openrouter_name"]
 
         print(f"\nProcessing model: {display_name}")

@@ -74,9 +74,11 @@ class Agent:
             my_share_frac = 0.5 + 0.5 * f
             min_accept = self.total * my_share_frac
             partner_threshold = self.total * (1 - my_share_frac)
+        if not self.has_advantage and remaining == 2:
+            min_accept = 0
         if o is not None:
             my_val = self.value(o)
-            if my_val >= min_accept and not (is_last_turn and my_val == 0):
+            if my_val > 0 and my_val >= min_accept:
                 return None
         m = [0] * self.n_types
         current_util = 0.0

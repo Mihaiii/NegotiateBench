@@ -7,131 +7,136 @@ class Agent:
         self.values = values
         self.max_rounds = max_rounds
         self.total_turns = max_rounds * 2
-        self.turn_index = me 
+        
+        # Current turn index: Starts at 0 (if me=0) or 1 (if me=1), increments by 2
+        self.current_turn = me
         
         self.max_val = sum(c * v for c, v in zip(counts, values))
         
-        # Opponent modeling:
-        # Track effective 'cost' of items based on how often opponent keeps them.
-        self.opp_kept_sum = [0] * len(counts)
-        self.opp_moves = 0
+        # Opponent modeling: Store lists of what opponent wanted (Total - Offered to me)
+        self.opp_history_demands = []
+        self.best_offer_val = 0
         
     def offer(self, o: list[int] | None) -> list[int] | None:
-        # 1. Update Inferred Opponent Utility if an offer is received
-        val_offered = 0
+        # 1. Update Opponent Model & Parse Offer
         if o is not None:
-            self.opp_moves += 1
-            for i, qty in enumerate(o):
-                # Calculate what opponent kept for themselves: Total - Offered to Me
-                kept = self.counts[i] - qty
-                self.opp_kept_sum[i] += kept
-                val_offered += qty * self.values[i]
-        
-        # 2. Determine Strategy (Aspiration Level)
-        # Calculate progress from 0.0 (start) to 1.0 (deadline)
-        progress = self.turn_index / max(1, self.total_turns - 1)
-        
-        # Target Curve: 
-        # Phase 1 (0-20%): Hardball (100%). Establish dominance.
-        # Phase 2 (20%-80%): Negotiation (Linear drop to 75%). Trade efficiency.
-        # Phase 3 (80%-100%): Closing (Drop to 50%). Secure the deal.
-        if progress < 0.2:
-            factor = 1.0
-        elif progress < 0.8:
-            # Linear descent from 1.0 to 0.75 over 0.6 progress
-            factor = 1.0 - 0.25 * ((progress - 0.2) / 0.6)
+            # o is what partner offers ME.
+            # Determine what partner WANTS for themselves: Total - Offered
+            opp_wants = [self.counts[i] - o[i] for i in range(len(self.counts))]
+            self.opp_history_demands.append(opp_wants)
+            
+            val_offered = sum(q * v for q, v in zip(o, self.values))
+            self.best_offer_val = max(self.best_offer_val, val_offered)
         else:
-            # Steep descent from 0.75 to 0.50 over 0.2 progress
-            factor = 0.75 - 0.25 * ((progress - 0.8) / 0.2)
+            val_offered = 0
             
-        target = int(self.max_val * factor)
-        # Always try to get at least 1 unit of value if possible
-        if self.max_val > 0:
-            target = max(1, target)
-
-        # 3. Generate Proposal Plan
-        # We utilize a heuristic Knapsack approach based on efficiency (MyVal / OppCost)
-        proposal_bundle, proposal_val = self._build_proposal(target)
-
-        # 4. Acceptance Logic
+        # 2. Check Acceptance Conditions
+        turns_left = self.total_turns - 1 - self.current_turn
+        
         if o is not None:
-            turns_left = self.total_turns - 1 - self.turn_index
-            
-            # A. Ultimatum (Last turn for Me to act)
-            # If I (P2) reject now at the very last turn, the outcome is 0 for both.
-            # Rationally, accept anything > 0.
+            # A. Last Turn Absolute Safety
+            # If I allow the negotiation to fail on the last turn, we both get 0.
+            # I must accept anything positive.
             if turns_left == 0:
                 if val_offered > 0 or self.max_val == 0:
                     return None
             
-            # B. Standard Acceptance
-            # If the offer meets my current strategic target, accept.
+            # B. Target-based Acceptance
+            target = self._get_target_value(turns_left)
             if val_offered >= target:
                 return None
-            
-            # C. Strategic Dominance Check
-            # If their offer gives me more value than what I am planning to propose back,
-            # accept it immediately. Counter-offering less value is irrational.
-            if val_offered >= proposal_val:
-                return None
                 
-            # D. Late Game Compromise
-            # Near the deadline (last 1-2 rounds), accept any 'good' deal (>65%)
-            # to avoid the risk of the opponent walking away or random failures.
+            # C. Panic Mode / Near Deadline
+            # If 2 turns or fewer left, accept any reasonably good deal (>65% max)
+            # to avoid accidental collisions or stubbornness failures.
             if turns_left <= 2 and val_offered >= self.max_val * 0.65:
                 return None
+                
+        # 3. Formulate Counter-Offer
+        target = self._get_target_value(turns_left)
+        my_proposal = self._build_knapsack_proposal(target)
+        
+        # D. Rationality Check
+        # If the proposal I generated is worth LESS to me than what they just offered,
+        # I should just accept their offer.
+        my_proposal_val = sum(q * v for q, v in zip(my_proposal, self.values))
+        if o is not None and val_offered >= my_proposal_val:
+            return None
+            
+        # Update state for next turn
+        self.current_turn += 2
+        return my_proposal
 
-        # 5. Return Proposal
-        self.turn_index += 2
-        return proposal_bundle
+    def _get_target_value(self, turns_left: int) -> int:
+        # Calculate negotiation progress (0.0 start -> 1.0 deadline)
+        turns_passed = self.current_turn
+        progress = turns_passed / max(1, self.total_turns - 1)
+        
+        # Concession Curve Strategy
+        if progress < 0.2:
+            f = 1.0 # Phase 1: Hold firm
+        elif progress < 0.8:
+            # Phase 2: Linear descent from 1.0 down to 0.75
+            p = (progress - 0.2) / 0.6
+            f = 1.0 - (0.25 * p)
+        else:
+            # Phase 3: End game descent 0.75 -> 0.50
+            p = (progress - 0.8) / 0.2
+            f = 0.75 - (0.25 * p)
+            
+        target = int(self.max_val * f)
+        # Always try to get at least 1 unit of value if possible
+        return max(1, target)
 
-    def _build_proposal(self, target: int) -> tuple[list[int], int]:
-        """
-        Constructs a bundle summing to >= target using greedy efficiency.
-        Prioritizes items with high (My Value / Opponent Interest).
-        Returns (proposal_list, actual_value_of_proposal)
-        """
+    def _build_knapsack_proposal(self, target: int) -> list[int]:
+        # Estimate opponent interest using weighted recency
+        opp_interest = [0.0] * len(self.counts)
+        weight_sum = 0.0
+        
+        if self.opp_history_demands:
+            for i, demands in enumerate(reversed(self.opp_history_demands)):
+                # Decay factor: recent rounds count more
+                w = 0.85 ** i
+                weight_sum += w
+                for k in range(len(demands)):
+                    opp_interest[k] += demands[k] * w
+            for k in range(len(opp_interest)):
+                opp_interest[k] /= weight_sum
+                
+        # Create list of individual item units with their efficiency scores
+        candidates = []
+        for i in range(len(self.counts)):
+            my_v = self.values[i]
+            
+            # Efficiency = My Value / Opponent Cost
+            # Add small epsilon to cost to avoid division by zero
+            # Note: opp_interest[i] is roughly the count they demand on average.
+            cost = opp_interest[i] + 0.05
+            
+            # If I value it 0, efficiency is 0. 
+            # I shouldn't take it unless needed, but generally good to give to opponent.
+            efficiency = my_v / cost
+            
+            # Add tiny noise for predictable tie-breaking prevention
+            efficiency += random.uniform(0, 1e-6)
+            
+            for _ in range(self.counts[i]):
+                candidates.append((efficiency, i, my_v))
+        
+        # Sort by efficiency descending (Best items for ME to keep)
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        
         proposal = [0] * len(self.counts)
         current_val = 0
         
-        # 1. Expand items into individual units for granular selection
-        candidates = []
-        for i, count in enumerate(self.counts):
-            my_v = self.values[i]
-            
-            # Opponent Interest: Normalized frequency of them keeping this item.
-            # If they keep it often, it's "expensive" to ask for it.
-            if self.opp_moves > 0:
-                opp_freq = self.opp_kept_sum[i] / self.opp_moves
-            else:
-                opp_freq = 0.0
-            
-            # Efficiency Score: Value gained per unit of Opponent Resistance.
-            # If I value it 0, score is negative (I want to NOT keep it, i.e. give to opponent).
-            if my_v > 0:
-                # Add small epsilon to denominator to handle implicit 0 freq
-                score = my_v / (opp_freq + 0.05)
-            else:
-                score = -1.0
-            
-            # Add tiny noise to prevent deterministic loops in negotiation cycles
-            score += random.uniform(0, 1e-5)
-            
-            for _ in range(count):
-                candidates.append((score, i, my_v))
-        
-        # 2. Sort candidates by Efficiency (Highest Score = Best for Me to Keep)
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        
-        # 3. Fill Bundle Greedily
-        for score, idx, v in candidates:
+        # Greedy selection until target is met
+        for eff, idx, val in candidates:
             if current_val < target:
                 proposal[idx] += 1
-                current_val += v
+                current_val += val
             else:
-                # Target met. 
-                # Stop taking items. Leaving the rest for the opponent increases 
-                # likelihood they accept, as we are giving them "High Frequency" items.
+                # Target met. Stop taking items.
+                # Leaving the rest improves chances opponent accepts.
                 break
                 
-        return proposal, current_val
+        return proposal

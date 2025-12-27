@@ -10,7 +10,7 @@ class Agent:
         self.max_turns = 2 * max_rounds
         self.my_turn_number = 0
         self.partner_offers = []
-        self.has_advantage = (self.max_turns % 2 == 0 and self.me == 0) or (self.max_turns % 2 == 1 and self.me == 1)
+        self.has_advantage = (self.max_turns % 2 == 0 and self.me == 1) or (self.max_turns % 2 == 1 and self.me == 0)
 
     def value(self, o: list[int]) -> float:
         return sum(o[i] * self.values[i] for i in range(self.n_types))
@@ -77,7 +77,7 @@ class Agent:
                 return None
         m = [0] * self.n_types
         current_util = 0.0
-        if is_penultimate and self.has_advantage:
+        if is_penultimate and not self.has_advantage:
             for i in range(self.n_types):
                 if self.values[i] == 0:
                     m[i] = self.counts[i]
@@ -85,7 +85,7 @@ class Agent:
             if current_util == 0:
                 candidates = [i for i in range(self.n_types) if self.values[i] > 0 and v_partner[i] > 0 and self.counts[i] > 0]
                 if candidates:
-                    candidates.sort(key=lambda i: (self.values[i], -v_partner[i]))
+                    candidates.sort(key=lambda i: (v_partner[i], self.values[i]))
                     best = candidates[0]
                     m[best] = 1
                     current_util += v_partner[best]

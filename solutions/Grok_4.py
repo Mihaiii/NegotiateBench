@@ -61,17 +61,12 @@ class Agent:
             min_accept = 0
             partner_threshold = 0
         elif is_penultimate:
-            min_accept = self.total / 2
+            min_accept = self.total * 0.9
             max_unit = max((v_partner[i] for i in range(self.n_types) if self.counts[i] > 0), default=0)
-            if self.has_advantage:
-                partner_threshold = max_unit * 0.1 if max_unit > 0 else 0
-            else:
-                f = 1 - progress ** power
-                my_share_frac = 0.5 + 0.5 * f
-                partner_threshold = self.total * (1 - my_share_frac)
+            partner_threshold = max_unit * 0.1 if max_unit > 0 else 0
         else:
-            f = 1 - progress ** power
-            my_share_frac = 0.5 + 0.5 * f
+            g = progress ** power
+            my_share_frac = 0.5 + 0.5 * g
             min_accept = self.total * my_share_frac
             partner_threshold = self.total * (1 - my_share_frac)
         if not self.has_advantage and remaining == 2:
@@ -83,12 +78,10 @@ class Agent:
         m = [0] * self.n_types
         current_util = 0.0
         if is_penultimate and self.has_advantage:
-            # Give all free items
             for i in range(self.n_types):
                 if self.values[i] == 0:
                     m[i] = self.counts[i]
                     current_util += m[i] * v_partner[i]
-            # If still 0, give 1 of cheapest costly item with positive v_partner
             if current_util == 0:
                 candidates = [i for i in range(self.n_types) if self.values[i] > 0 and v_partner[i] > 0 and self.counts[i] > 0]
                 if candidates:
@@ -97,7 +90,6 @@ class Agent:
                     m[best] = 1
                     current_util += v_partner[best]
         else:
-            # Normal case
             for i in range(self.n_types):
                 if self.values[i] == 0:
                     m[i] = self.counts[i]
@@ -118,7 +110,7 @@ class Agent:
                     added = num * util_per
                     current_util += added
                     remaining_needed -= added
-            if current_util == 0 and candidates and not is_last_turn:
+            if current_util == 0 and partner_threshold > 0 and candidates and not is_last_turn:
                 i = candidates[0]
                 m[i] += 1
         my_offer = [self.counts[i] - m[i] for i in range(self.n_types)]

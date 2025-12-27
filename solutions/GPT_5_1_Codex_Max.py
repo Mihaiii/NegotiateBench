@@ -1,14 +1,14 @@
 from typing import List, Optional
 
-
 class Agent:
     """
-    GPT 5.1 Codex Max – revised haggling bot.
-    Strategy:
-      * Enumerate feasible splits when the space is modest; otherwise, use a guided greedy.
-      * Start ambitious, concede smoothly, but keep a firm reservation value.
-      * Estimate opponent interest from their offers.
-      * Accept only clearly beneficial deals early; soften near the end, and if I move last, salvage any value.
+    GPT 5.1 Codex Max – improved haggling bot.
+
+    Key ideas:
+    - Enumerate all possible splits when feasible; otherwise use a greedy generator.
+    - Start ambitious and concede smoothly, but keep a firm reservation value.
+    - Infer opponent interests from their offers (items they keep are likely valuable to them).
+    - Favour offers that are good for me and plausibly good for them to increase acceptance chance.
     """
 
     def __init__(self, me: int, counts: List[int], values: List[int], max_rounds: int):
@@ -16,30 +16,29 @@ class Agent:
         self.counts = counts
         self.values = values
         self.n = len(counts)
-        self.max_turns = max_rounds  # my own turns
+        self.max_turns = max_rounds  # my own turns count
         self.turn = 0
         self.total_value = sum(c * v for c, v in zip(counts, values))
-        self.best_seen = 0
+        self.best_seen = 0  # best incoming offer value
         self.last_offer_made: Optional[List[int]] = None
         self.last_offer_from_them: Optional[List[int]] = None
         self.stall = 0
 
-        # Opponent value estimate (uniform starting prior)
-        total_items = sum(counts)
-        base = (self.total_value / total_items) if total_items else 1.0
-        base = max(0.5, base)
+        # Opponent interest estimate: start uniform
+        total_items = sum(counts) if sum(counts) > 0 else 1
+        base = max(0.5, self.total_value / total_items)
         self.opp_w = [float(base) for _ in range(self.n)]
         self.keep_counts = [0] * self.n
         self.give_counts = [0] * self.n
 
-        # Precompute candidate offers if search space is reasonable
+        # Precompute candidates if space is reasonable
         self.candidates: Optional[List[tuple[int, float, List[int]]]] = None
         space = 1
         for c in counts:
             space *= (c + 1)
-            if space > 400_000:
+            if space > 250_000:
                 break
-        if self.total_value > 0 and space <= 400_000:
+        if self.total_value > 0 and space <= 250_000:
             tmp: List[tuple[int, float, List[int]]] = []
             self._enum(0, [0] * self.n, tmp)
             # Sort by my value desc, opponent est desc
@@ -49,7 +48,7 @@ class Agent:
             for mv, ov, off in tmp:
                 if mv not in best_for_val or ov > best_for_val[mv][1]:
                     best_for_val[mv] = (mv, ov, off)
-            merged = list(best_for_val.values()) + tmp[:300]  # diversify
+            merged = list(best_for_val.values()) + tmp[:300]
             seen = set()
             cand = []
             for mv, ov, off in merged:
@@ -82,40 +81,40 @@ class Agent:
     def _progress(self) -> float:
         if self.max_turns <= 1:
             return 1.0
-        return min(1.0, max(0.0, self.turn / self.max_turns))
+        # turn is 1-based in our implementation
+        return min(1.0, max(0.0, (self.turn - 1) / (self.max_turns - 1)))
 
     def _accept_threshold(self, last_turn: bool) -> float:
         if self.total_value == 0:
             return 0.0
         prog = self._progress()
-        # Linear from 0.98 -> 0.55 of total value
-        start, end = 0.98, 0.55
+        # Linear from 0.97 -> 0.5 of total value
+        start, end = 0.97, 0.5
         th = self.total_value * (start - (start - end) * prog)
-        # If it's my very last chance (me == 1), salvage anything
+        # Never go below 0.35 of total unless it's absolutely last chance with me second
         if last_turn and self.me == 1:
-            return 0.0
-        if last_turn:
-            th = min(th, self.total_value * 0.3)
-        if self.best_seen > 0:
-            th = min(th, self.best_seen * 0.95)
+            th = max(th, 0.1 * self.total_value)
+        else:
+            th = max(th, 0.35 * self.total_value)
+        # Do not reduce threshold solely because of low best_seen; avoid huge losses
         return th
 
-    def _target_value(self) -> float:
+    def _target_value(self, last_turn: bool) -> float:
         # Target I aim for in my own offers; smoothly decrease
-        hi, lo = 1.0, 0.65
+        hi, lo = 1.0, 0.6
         t = self.total_value * (hi - (hi - lo) * self._progress())
         # If stalled, concede slightly faster
         t -= self.stall * 0.02 * self.total_value
-        t = max(t, self.total_value * 0.45)
-        if self.best_seen > 0:
-            t = max(t, self.best_seen * 0.9)
+        if last_turn:
+            t = max(t, 0.45 * self.total_value)
+        t = max(t, 0.4 * self.total_value)
         return t
 
     def _concession_order(self) -> List[int]:
         # Lower (value / opp_weight) are conceded first
         order = []
         for i in range(self.n):
-            ratio = self.values[i] / (self.opp_w[i] + 0.5)
+            ratio = (self.values[i] + 0.01) / (self.opp_w[i] + 0.5)
             order.append((ratio, self.values[i], i))
         order.sort(key=lambda x: (x[0], x[1], x[2]))
         return [i for _, _, i in order]
@@ -123,7 +122,7 @@ class Agent:
     def _select_offer(self, target: float, forbid: Optional[List[int]]) -> List[int]:
         prog = self._progress()
         # Blend weight on my value vs estimated opponent satisfaction
-        w_my = 0.85 - 0.3 * prog  # decreases over time
+        w_my = 0.85 - 0.25 * prog  # decreases over time
 
         # Use precomputed candidates if available
         if self.candidates:
@@ -132,7 +131,8 @@ class Agent:
             for mv, ov, off in self.candidates:
                 if forbid is not None and off == forbid:
                     continue
-                if mv < target and prog < 0.95:
+                # Prefer offers meeting target early; relax late
+                if mv < target and prog < 0.9:
                     continue
                 score = w_my * mv + (1 - w_my) * ov
                 if score > best_score:
@@ -204,11 +204,12 @@ class Agent:
             self.last_offer_from_them = o.copy()
             self._update_opp_from_offer(o)
 
-        # If I move second and this is my last chance, take the best we can get now
+        # Special last chance when we move second: accept anything that gives some value
         if o is not None and last_turn and self.me == 1:
-            return None  # accept any value (nonnegative)
+            if incoming_val > 0:
+                return None
 
-        # Early acceptance of very good offers
+        # Early acceptance of good offers or matching my own
         if o is not None:
             if self.last_offer_made is not None and o == self.last_offer_made:
                 return None
@@ -216,7 +217,7 @@ class Agent:
                 return None
 
         # Build counter-offer
-        target = self._target_value()
+        target = self._target_value(last_turn)
         forbid = o if o is not None else None
         counter = self._select_offer(target, forbid)
 

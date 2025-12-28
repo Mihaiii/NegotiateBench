@@ -25,7 +25,7 @@ class Agent:
         num_off = len(self.partner_offers)
         avg_taken = [0.0] * self.n_types
         sum_weights = 0.0
-        alpha = 0.7
+        alpha = 0.5
         for k in range(num_off):
             weight = alpha ** (num_off - 1 - k)
             o = self.partner_offers[k]
@@ -66,7 +66,7 @@ class Agent:
             partner_threshold = max_unit * 0.1 if max_unit > 0 else 0
         else:
             g = progress ** power
-            my_share_frac = 0.5 + 0.5 * g
+            my_share_frac = 0.7 + 0.3 * g
             min_accept = self.total * my_share_frac
             partner_threshold = self.total * (1 - my_share_frac)
         if not self.has_advantage and remaining == 2:

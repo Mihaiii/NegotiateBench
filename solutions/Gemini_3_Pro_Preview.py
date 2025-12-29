@@ -7,157 +7,136 @@ class Agent:
         self.values = values
         self.max_rounds = max_rounds
         self.total_turns = max_rounds * 2
-        
-        # Current turn index: Starts at 0 or 1, increments by 2
-        self.turn_idx = me 
+        self.turn_number = me
         
         self.max_val = sum(c * v for c, v in zip(counts, values))
         
-        # Opponent Modeling: lists of what opponent kept (Total - Offered)
-        self.opp_demands = [] 
-        self.best_offer_val = 0
+        # Track history of what the opponent *keeps* (their demands)
+        self.opp_history_demands = [] 
         
     def offer(self, o: list[int] | None) -> list[int] | None:
-        # 1. Update Opponent Model & Parse Offer
+        # Determine turns left for the whole game after this action
+        turns_remaining = self.total_turns - 1 - self.turn_number
+
         val_offered = 0
         if o is not None:
-            # o is what partner offers ME.
-            # Determine what partner WANTS for themselves: Total - Offered
-            opp_wants = [self.counts[i] - o[i] for i in range(len(self.counts))]
-            self.opp_demands.append(opp_wants)
+            # Calculate value of the offer to me
+            val_offered = sum(self.values[i] * o[i] for i in range(len(self.counts)))
             
-            val_offered = sum(q * v for q, v in zip(o, self.values))
-            if val_offered > self.best_offer_val:
-                self.best_offer_val = val_offered
+            # Infer what opponent kept: Total - Offered
+            kept = [self.counts[i] - o[i] for i in range(len(self.counts))]
+            self.opp_history_demands.append(kept)
+        
+        # --- 1. Acceptance Logic ---
 
-        # 2. Determine Progress and Status
-        # valid turns remaining *after* this one (for me or opponent)
-        turns_remaining_after_me = self.total_turns - 1 - self.turn_idx
-        
-        # Normalized progress 0.0 (start) -> 1.0 (end)
-        progress = self.turn_idx / max(1, self.total_turns - 1)
-        
-        # 3. Acceptance Logic
-        
-        # A. Last Turn Absolute Safety (I am the last mover)
-        # If I counter, the negotiation ends with no deal. I must accept anything > 0.
-        if turns_remaining_after_me == 0:
-            if o is not None and (val_offered > 0 or self.max_val == 0):
+        # A. Last Mover Safety (I am acting on the very last turn of the session)
+        # If I reject, the result is 0 for everyone. Rational interaction dictates accepting any gain.
+        if turns_remaining == 0:
+            if o is not None and val_offered > 0:
                 return None
         
-        # B. High Value Acceptance (Take the money and run)
-        if o is not None:
-             if val_offered >= self.max_val * 0.98:
-                 return None
-                 
-        # 4. Target Calculation (Reservation Value)
-        # Strategy: Stubborn start, linear middle, compromise end.
-        if progress < 0.4:
+        # B. Calculate Dynamic Target
+        # Linear descent from 1.0 (start) to 0.7 (80% time), then panic to 0.55 (end)
+        progress = self.turn_number / max(1, self.total_turns - 1)
+        
+        if progress < 0.2:
             target_pct = 1.0
-        elif progress < 0.9:
-            # Descent from 1.0 to 0.7
-            ratio = (progress - 0.4) / 0.5
-            target_pct = 1.0 - (0.3 * ratio)
+        elif progress < 0.8:
+            # 1.0 -> 0.7
+            target_pct = 1.0 - (0.3 * (progress - 0.2) / 0.6)
         else:
-            # Endgame panic: 0.7 -> 0.55
-            ratio = (progress - 0.9) / 0.1
-            target_pct = 0.7 - (0.15 * ratio)
+            # 0.7 -> 0.55
+            target_pct = 0.7 - (0.15 * (progress - 0.8) / 0.2)
             
         target_val = int(self.max_val * target_pct)
         
-        # 5. Check Offer vs Target (with fallback logic)
+        # C. Check Offer against Target and Safety Nets
         if o is not None:
-            if turns_remaining_after_me <= 2:
-                # Near deadline: Accept if offer is decent (65%+) or best seen so far within reason
-                safety_floor = int(self.max_val * 0.65)
-                # If target is still high, relax it to the best reliable alternative
-                relaxed_target = min(target_val, max(safety_floor, int(self.best_offer_val)))
-                
-                if val_offered >= relaxed_target:
-                    return None
-            else:
-                # Standard phase: Hold firm to target
-                if val_offered >= target_val:
-                    return None
-                    
-        # 6. Generate Counter-Proposal (Knapsack Heuristic)
-        # Estimate Opponent Interest (Cost) taking recency into account
-        opp_weights = [0.0] * len(self.counts)
-        hist_len = len(self.opp_demands)
-        
-        if hist_len > 0:
-            denom = 0.0
-            for i, d in enumerate(self.opp_demands):
-                # Weight moves: 1.0 (oldest) to 3.0 (newest)
-                w = 1.0 + (2.0 * i / hist_len)
-                denom += w
-                for k in range(len(self.counts)):
-                    # Fraction of total available items they demanded
-                    frac = d[k] / max(1, self.counts[k])
-                    opp_weights[k] += frac * w
-            for k in range(len(self.counts)):
-                opp_weights[k] /= denom
-        else:
-            # Default assumption
-            opp_weights = [0.5] * len(self.counts)
+            # 1. Met Target
+            if val_offered >= target_val:
+                return None
             
-        # Create item candidates with efficiency score
-        # Efficiency = MyValue / (OpponentCost + epsilon)
+            # 2. End-game Compromise (Last 2 rounds)
+            # Accept if > 55% of total value to avoid total failure
+            if turns_remaining <= 3:
+                if val_offered >= self.max_val * 0.55:
+                    return None
+            
+            # 3. High Value Absolute Accept (Take the money and run)
+            if val_offered >= self.max_val * 0.95:
+                return None
+
+        # --- 2. Counter-Offer Generation ---
+        
+        # A. Opponent Modeling (Identify Conflict Items)
+        # Weights: Base 1.0. Increases if opponent keeps item.
+        # Recency: Newer moves count 3x more than oldest.
+        opp_weights = [1.0] * len(self.counts) 
+        n_history = len(self.opp_history_demands)
+        
+        if n_history > 0:
+            for t_idx, demand in enumerate(self.opp_history_demands):
+                # Weight: Oldest = 1.0, Newest = 3.0
+                w = 1.0 + (2.0 * t_idx / n_history)
+                for i in range(len(self.counts)):
+                    if self.counts[i] > 0:
+                        # Add weighted proportion of item kept
+                        opp_weights[i] += (demand[i] / self.counts[i]) * w
+        
+        # B. Efficiency Calculation (MyValue / Oppweight)
+        # This prioritizes items I want that the opponent seems to ignore.
         candidates = []
         for i in range(len(self.counts)):
-            cost = opp_weights[i] + 0.05
-            val = self.values[i]
-            
-            if cost > 0:
-                eff = val / cost
-            else:
-                eff = float('inf')
-                
-            # Tie-breaking jitter
-            eff += random.uniform(0, 1e-6)
-            
-            candidates.append({
-                'idx': i,
-                'val': val,
-                'eff': eff,
-                'count': self.counts[i],
-                'opp_weight': opp_weights[i]
-            })
-            
-        # Sort by efficiency descending (Best for ME, cheapest for OPP)
-        candidates.sort(key=lambda x: x['eff'], reverse=True)
+            if self.counts[i] > 0:
+                # Add small epsilon to weight to avoid div/0
+                eff = self.values[i] / (opp_weights[i] + 0.01)
+                # Random tiebreaker
+                eff += random.uniform(0, 0.00001)
+                candidates.append((eff, i))
+        
+        # Sort descending by efficiency
+        candidates.sort(key=lambda x: x[0], reverse=True)
         
         proposal = [0] * len(self.counts)
         current_prop_val = 0
         
-        # Greedy Item Selection
-        for item in candidates:
-            idx = item['idx']
-            v = item['val']
-            n = item['count']
-            
-            # If value is 0, skipping it usually helps the deal (opponent might want it)
-            if v == 0:
+        # C. Greedy Knapsack Fill
+        for _, idx in candidates:
+            # If I value it 0, skip (unless strictly needed? No, worthless to me)
+            if self.values[idx] == 0:
                 continue
                 
-            # Take items one by one to hit target precisely
-            for _ in range(n):
+            count = self.counts[idx]
+            val_per_item = self.values[idx]
+            
+            # Take items until target reached
+            take = 0
+            for _ in range(count):
                 if current_prop_val < target_val:
-                    proposal[idx] += 1
-                    current_prop_val += v
+                    take += 1
+                    current_prop_val += val_per_item
                 else:
-                    # Target met. Only add extra items if they are "cheap" (low opp interest)
-                    if item['opp_weight'] < 0.2:
-                        proposal[idx] += 1
-                        current_prop_val += v
-                    else:
-                        break
+                    break
+            proposal[idx] = take
 
-        # 7. Rationality Check
-        # If the proposal I just built is worth less than (or equal to) what they offered, use theirs.
+        # D. Top-up with "freebies"
+        # If there are items I value that opponent strongly ignores (low weight), take them
+        # even if target is met. This maximizes score without jeopardizing the deal much.
+        max_w = max(opp_weights)
+        # Threshold: Bottom 25% of contention relative to max interest
+        threshold = 1.0 + 0.25 * (max_w - 1.0) 
+        
+        for i in range(len(self.counts)):
+            if proposal[i] < self.counts[i] and self.values[i] > 0:
+                if opp_weights[i] <= threshold:
+                    taken = self.counts[i] - proposal[i]
+                    proposal[i] += taken
+                    current_prop_val += taken * self.values[i]
+
+        # E. Final Sanity Check
+        # If the proposal I built is worse for me than what they just offered, accept theirs.
         if o is not None and val_offered >= current_prop_val:
             return None
 
-        # Prepare for next turn
-        self.turn_idx += 2
+        self.turn_number += 2
         return proposal

@@ -85,14 +85,18 @@ class Agent:
             candidates = [i for i in range(self.n_types) if v_partner[i] > 0 and self.values[i] > 0 and self.counts[i] - m[i] > 0]
             if candidates and (remaining_needed > 0 or (is_penultimate and current_util <= 0)):
                 if is_penultimate or remaining_needed < 1.0:
-                    # minimal cost to make positive
-                    candidates.sort(key=lambda i: (self.values[i], v_partner[i]))
-                    best = candidates[0]
+                    min_unit_v = self.total / 5.0
+                    safe_candidates = [i for i in candidates if v_partner[i] >= min_unit_v]
+                    if safe_candidates:
+                        safe_candidates.sort(key=lambda i: (self.values[i], v_partner[i]))
+                        best = safe_candidates[0]
+                    else:
+                        candidates.sort(key=lambda i: (-v_partner[i], self.values[i]))
+                        best = candidates[0]
                     num = 1
                     m[best] += num
                     current_util += num * v_partner[best]
                 else:
-                    # greedy for larger threshold
                     candidates.sort(key=lambda i: (-v_partner[i] / self.values[i], -self.values[i]))
                     for i in candidates:
                         util_per = v_partner[i]
@@ -106,9 +110,14 @@ class Agent:
                         if remaining_needed <= 0:
                             break
             if current_util <= 0 and partner_threshold > 0 and candidates and not is_last_turn:
-                # fallback add one
-                candidates.sort(key=lambda i: (self.values[i], v_partner[i]))
-                best = candidates[0]
+                min_unit_v = self.total / 5.0
+                safe_candidates = [i for i in candidates if v_partner[i] >= min_unit_v]
+                if safe_candidates:
+                    safe_candidates.sort(key=lambda i: (self.values[i], v_partner[i]))
+                    best = safe_candidates[0]
+                else:
+                    candidates.sort(key=lambda i: (-v_partner[i], self.values[i]))
+                    best = candidates[0]
                 m[best] += 1
         my_offer = [self.counts[i] - m[i] for i in range(self.n_types)]
         return my_offer

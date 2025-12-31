@@ -7,132 +7,133 @@ class Agent:
         self.values = values
         self.max_rounds = max_rounds
         self.total_turns = max_rounds * 2
-        self.turn = me
+        
+        # Track the logical turn index (Player 0 acts on 0, 2... Player 1 on 1, 3...)
+        self.turn_index = me
         
         self.total_value = sum(c * v for c, v in zip(counts, values))
-        self.opp_demands = []
+        
+        # Opponent modeling: Track how often opponent KEEPS each item.
+        # If they offer us X, they kept (Total - X).
+        self.opp_kept_sum = [0] * len(counts)
+        self.opp_moves = 0
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        turns_left = self.total_turns - 1 - self.turn
+        turns_left = self.total_turns - 1 - self.turn_index
         
-        # Calculate valuation of the incoming offer
-        opp_val = 0
+        # --- 1. Analyze Incoming Offer ---
+        offer_val = 0
         if o is not None:
-            opp_val = sum(self.values[i] * o[i] for i in range(len(self.counts)))
-            # Record what they kept (Total - Offered)
+            offer_val = sum(v * c for v, c in zip(self.values, o))
+            
+            # Update opponent model
+            # kept[i] is what they kept for themselves
             kept = [self.counts[i] - o[i] for i in range(len(self.counts))]
-            self.opp_demands.append(kept)
-        
-        # --- 1. End-Game Survival Logic ---
-        
-        # If I am the last mover (turns_left == 0), any counter-offer results in No Deal (0).
-        # Rational choice is to accept anything that isn't strict 0 (and even then, 0 vs 0 is equal).
+            for i in range(len(self.counts)):
+                self.opp_kept_sum[i] += kept[i]
+            self.opp_moves += 1
+
+        # --- 2. End-Game Survival Logic ---
+        # If I am the last mover (turns_left == 0), rejecting means 0 payoff.
+        # We must accept any non-negative offer (conceptually anything > 0, 
+        # but technically 0 is equal to the no-deal payoff).
         if turns_left == 0:
             if o is not None:
                 return None
 
-        # --- 2. Target Calculation ---
+        # --- 3. Target Calculation ---
+        # Progress 0.0 (start) to 1.0 (end)
+        progress = self.turn_index / max(1, self.total_turns - 1)
         
-        # Calculate negotiation progress (0.0 to 1.0)
-        progress = self.turn / max(1, self.total_turns - 1)
+        # Concession Curve Strategy:
+        # 0% - 50%: Hardball (100% value). Only concede if it's "free" to do so.
+        # 50% - 80%: Linear concession to 80% value to signal flexibility.
+        # 80% - 95%: Drop to 65% (Deal Zone).
+        # 95% - 100%: Panic drop to 50% to salvage a deal.
         
-        # Adaptive Concession Curve:
-        # Phase 1 (0-30%): Anchor High (100%). Signal strength to stubborn opponents.
-        # Phase 2 (30-75%): Linear concession to 80%.
-        # Phase 3 (75-95%): "Deal Zone" concession to 65%.
-        # Phase 4 (>95%): Panic drop to 50% to salvage value.
-        
-        if progress < 0.3:
+        if progress < 0.5:
             target_pct = 1.0
-        elif progress < 0.75:
-            # 0.3 -> 0.75 (range 0.45) drops 1.0 -> 0.8
-            target_pct = 1.0 - (0.2 * (progress - 0.3) / 0.45)
+        elif progress < 0.8:
+            # Drop from 1.0 to 0.8 over 0.3 progress
+            ratio = (progress - 0.5) / 0.3
+            target_pct = 1.0 - (0.2 * ratio)
         elif progress < 0.95:
-            # 0.75 -> 0.95 (range 0.2) drops 0.8 -> 0.65
-            target_pct = 0.8 - (0.15 * (progress - 0.75) / 0.2)
+            # Drop from 0.8 to 0.65 over 0.15 progress
+            ratio = (progress - 0.8) / 0.15
+            target_pct = 0.8 - (0.15 * ratio)
         else:
-            # 0.95 -> 1.0 drops 0.65 -> 0.5
-            target_pct = 0.65 - (0.15 * (progress - 0.95) / 0.05)
+            # Drop from 0.65 to 0.5 over 0.05 progress
+            ratio = (progress - 0.95) / 0.05
+            target_pct = 0.65 - (0.15 * ratio)
             
         target_val = int(self.total_value * target_pct)
-
-        # Safety Override: In the second-to-last turn, ensure we don't demand impossible values
-        # that risk the opponent walking away or failing their own constraints.
-        if turns_left <= 2:
-            target_val = min(target_val, int(self.total_value * 0.65))
         
-        # --- 3. Acceptance Logic ---
+        # Safety Override: In the absolute final exchanges, ensure we don't demand
+        # unreasonably high values that might cause the opponent to walk away.
+        if turns_left <= 2:
+            target_val = min(target_val, int(self.total_value * 0.7))
+
+        # --- 4. Acceptance Logic ---
         if o is not None:
-            # Accept if target is met
-            if opp_val >= target_val:
+            # A. Standard Acceptance
+            if offer_val >= target_val:
                 return None
             
-            # Acceptance "Sanity Floor" to prevent greed-based failures in late game
-            # If we are past 50% time, and offer is really good (>80%), take it.
-            if progress > 0.5 and opp_val >= self.total_value * 0.8:
+            # B. "Too Good To Refuse" (>= 95% value is always a win)
+            if offer_val >= self.total_value * 0.95:
                 return None
-            # If we are near end (>90%), accept >65%
-            if progress > 0.9 and opp_val >= self.total_value * 0.65:
+            
+            # C. Late Game Safety (>= 60% with <= 2 turns left)
+            # Prevents greed from killing a decent deal at the buzzer.
+            if turns_left <= 2 and offer_val >= self.total_value * 0.60:
                 return None
 
-        # --- 4. Proposal Generation ---
+        # --- 5. Proposal Generation (Knapsack Heuristic) ---
+        # Goal: Keep a set of items with sum(value) >= target_val.
+        # Optimization: Prioritize keeping items that I value highly AND 
+        # that the opponent seems to value less (low frequency of keeping).
         
-        # A. Opponent Modeling
-        # Estimate what opponent wants based on frequency of kept items.
-        opp_weights = [1.0] * len(self.counts)
-        if self.opp_demands:
-            n = len(self.opp_demands)
-            for i, demand in enumerate(self.opp_demands):
-                # Weight recent moves significantly higher (Cube weighting)
-                # This helps adapt quickly if opponent changes strategy.
-                w = 1.0 + (5.0 * (i / max(1, n))**2)
-                for j in range(len(self.counts)):
-                    if self.counts[j] > 0:
-                        opp_weights[j] += (demand[j] / self.counts[j]) * w
-        
-        # B. Greedy Construction (Subtraction Method)
-        # Start with "I want everything I value".
-        # Iteratively remove items that are "least painful" to give up.
-        # Pain Metric = My Value / Opponent Interest.
-        # Low metric = Easy concession.
-        
-        current_proposal = [0] * len(self.counts)
-        current_prop_val = 0
-        
-        # Breakdown items into individual units for granular removal
-        bag_items = []
+        # Create a pool of individual items for granular selection
+        pool = []
         for i in range(len(self.counts)):
-            if self.values[i] > 0:
-                current_proposal[i] = self.counts[i]
-                current_prop_val += self.counts[i] * self.values[i]
+            if self.counts[i] > 0:
+                # Estimate Opponent Interest (0.0 to 1.0) based on frequency
+                opp_freq = 0.0
+                if self.opp_moves > 0:
+                     opp_freq = (self.opp_kept_sum[i] / self.opp_moves) / self.counts[i]
                 
-                # Metric: High means "I want this more than you do" (Keep)
-                # Low means "You want this more than I do" (Give)
-                metric = (self.values[i] + 1e-5) / (opp_weights[i] + 1e-5)
-                # Jitter to avoid predictable loops
-                metric *= random.uniform(0.98, 1.02)
+                # Metric: My Value / (Opponent Interest + epsilon)
+                # High Metric = I want it much more than they seem to. -> KEEP.
+                # Low Metric = They want it more. -> GIVE.
+                score = (self.values[i] + 0.01) / (opp_freq + 0.01)
+                
+                # Add slight noise to avoid deterministic loops and explore trade space
+                score *= random.uniform(0.98, 1.02)
                 
                 for _ in range(self.counts[i]):
-                    bag_items.append({'idx': i, 'val': self.values[i], 'metric': metric})
+                    pool.append({'i': i, 'val': self.values[i], 'score': score})
         
-        # Sort by metric ascending (lowest first = remove first)
-        bag_items.sort(key=lambda x: x['metric'])
+        # Sort items by score descending (Keep the "best deals" for me first)
+        pool.sort(key=lambda x: x['score'], reverse=True)
         
-        # Remove items while we can afford to (keeping value >= target)
-        for item in bag_items:
-            if current_prop_val - item['val'] >= target_val:
-                current_proposal[item['idx']] -= 1
-                current_prop_val -= item['val']
+        my_offer_counts = [0] * len(self.counts)
+        current_planning_val = 0
+        
+        # Fill my bag until target is met
+        for item in pool:
+            if current_planning_val < target_val:
+                my_offer_counts[item['i']] += 1
+                current_planning_val += item['val']
             else:
-                # We can't remove this item without going below target.
-                # Stop removing to prioritize target value over efficiency.
-                pass
-                
-        # --- 5. Final Comparison ---
-        # If the opponent's offer is mathematically superior or equal to my planned counter,
-        # accepting is strictly dominant.
-        if o is not None and opp_val >= current_prop_val:
-            return None
+                # Once target is met, leave the remaining items for the opponent.
+                # This explicitly maximizes the value for the opponent subject to my target.
+                break
         
-        self.turn += 2
-        return current_proposal
+        # --- 6. Final Rationality Check ---
+        # If the incoming offer is strictly better than the proposal I just engineered,
+        # logic dictates I should just accept the offer instead of countering with something worse for me.
+        if o is not None and offer_val >= current_planning_val:
+            return None
+            
+        self.turn_index += 2
+        return my_offer_counts

@@ -65,7 +65,10 @@ class Agent:
             partner_threshold = 0
         else:
             g = progress ** power
-            my_share_frac = 0.7 + 0.3 * g
+            if self.has_advantage:
+                my_share_frac = 0.7 + 0.3 * g
+            else:
+                my_share_frac = 0.8 - 0.3 * g
             min_accept = self.total * my_share_frac
             partner_threshold = self.total * (1 - my_share_frac)
         if o is not None:
@@ -88,7 +91,7 @@ class Agent:
                     min_unit_v = self.total / 5.0
                     safe_candidates = [i for i in candidates if v_partner[i] >= min_unit_v]
                     if safe_candidates:
-                        safe_candidates.sort(key=lambda i: (self.values[i], v_partner[i]))
+                        safe_candidates.sort(key=lambda i: (self.values[i], -v_partner[i]))
                         best = safe_candidates[0]
                     else:
                         candidates.sort(key=lambda i: (-v_partner[i], self.values[i]))
@@ -113,7 +116,7 @@ class Agent:
                 min_unit_v = self.total / 5.0
                 safe_candidates = [i for i in candidates if v_partner[i] >= min_unit_v]
                 if safe_candidates:
-                    safe_candidates.sort(key=lambda i: (self.values[i], v_partner[i]))
+                    safe_candidates.sort(key=lambda i: (self.values[i], -v_partner[i]))
                     best = safe_candidates[0]
                 else:
                     candidates.sort(key=lambda i: (-v_partner[i], self.values[i]))

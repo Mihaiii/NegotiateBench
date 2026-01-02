@@ -1,18 +1,9 @@
 from typing import List, Optional
 
+
 class Agent:
     """
-    GPT 5.1 Codex Max – negotiation bot
-    Strategy summary
-    ----------------
-    - Pre‑enumerate all feasible allocations when the search space is small.
-      Score them by a weighted mix of my value, estimated opponent value, and
-      closeness to the incoming offer.
-    - If enumeration is large, fall back to a greedy/cheap‑concession builder.
-    - Opponent interests are estimated online: items they keep are considered
-      more valuable to them; items they give away repeatedly are downgraded.
-    - Acceptance threshold starts high and decreases smoothly; on the final
-      turn accept almost anything better than the best seen so far to avoid 0.
+    GPT 5.1 Codex Max – negotiation bot (re‑tuned)
     """
 
     def __init__(self, me: int, counts: List[int], values: List[int], max_rounds: int):
@@ -20,14 +11,14 @@ class Agent:
         self.counts = counts
         self.values = values
         self.n = len(counts)
-        self.max_turns = max_rounds              # how many times my offer() can be called
+        self.max_turns = max_rounds  # number of times offer() can be called
         self.turn = 0
 
         self.total_value = sum(c * v for c, v in zip(counts, values))
         self.best_seen = 0
         self.last_offer_made: Optional[List[int]] = None
 
-        # Opponent interest estimate (starts uniform)
+        # Opponent interest estimate (starts uniform-ish)
         total_items = max(1, sum(counts))
         base = (self.total_value / total_items) if self.total_value > 0 else 1.0
         self.opp_w = [float(base) for _ in range(self.n)]
@@ -37,21 +28,20 @@ class Agent:
         space = 1
         for c in counts:
             space *= (c + 1)
-            if space > 200_000:
+            if space > 300_000:
                 break
-        if space <= 200_000:
+        if space <= 300_000:
             tmp: List[tuple[int, float, List[int]]] = []
             self._enum(0, [0] * self.n, tmp)
+            # Keep a diverse but limited set: pareto on my value then by opp est
             tmp.sort(key=lambda x: (-x[0], -x[1]))
-            # Keep Pareto‑like subset
             filtered = []
             best_ov = -1.0
             for mv, ov, off in tmp:
                 if ov > best_ov:
                     filtered.append((mv, ov, off))
                     best_ov = ov
-            # Add some diversity
-            self.candidates = filtered[:400] if len(filtered) > 400 else filtered
+            self.candidates = filtered[:600] if len(filtered) > 600 else filtered
 
     # ---------- helpers ----------
     def _enum(self, idx: int, cur: List[int], acc: List[tuple[int, float, List[int]]]):
@@ -81,18 +71,18 @@ class Agent:
         if self.total_value == 0:
             return 0.0
         prog = self._progress()
-        start, end = 0.95, 0.55
+        start, end = 0.9, 0.45
         th = self.total_value * (start - (start - end) * prog)
-        floor = 0.5 * self.total_value
         if last_turn:
-            floor = 0.3 * self.total_value
-        return max(th, floor)
+            th = min(th, 0.35 * self.total_value)
+        return th
 
     def _target_value(self, last_turn: bool) -> float:
         if self.total_value == 0:
             return 0.0
+        prog = self._progress()
         hi, lo = 1.0, 0.6
-        t = self.total_value * (hi - (hi - lo) * self._progress())
+        t = self.total_value * (hi - (hi - lo) * prog)
         if last_turn:
             t = max(t, 0.5 * self.total_value)
         return t
@@ -100,7 +90,6 @@ class Agent:
     def _concession_order(self) -> List[int]:
         order = []
         for i in range(self.n):
-            # Lower ratio means cheaper for me, pricier for them (estimated)
             ratio = (self.values[i] + 0.01) / (self.opp_w[i] + 0.5)
             order.append((ratio, self.values[i], i))
         order.sort(key=lambda x: (x[0], x[1], x[2]))
@@ -110,10 +99,10 @@ class Agent:
         self,
         target: float,
         forbid: Optional[List[int]],
-        incoming: Optional[List[int]]
+        incoming: Optional[List[int]],
     ) -> List[int]:
         prog = self._progress()
-        w_my = 0.65 + 0.25 * (1 - prog)  # early: more selfish; late: more balanced
+        w_my = 0.65 + 0.2 * (1 - prog)  # early: more selfish; late: more balanced
         w_op = 1.0 - w_my
         dist_weight = 0.2 * prog
 
@@ -124,6 +113,7 @@ class Agent:
             for mv, ov, off in self.candidates:
                 if forbid is not None and off == forbid:
                     continue
+                # ensure all items allocated: already true by enumeration
                 if mv < target and prog < 0.9:
                     continue
                 score = w_my * (mv / (self.total_value + 1e-6)) + w_op * (ov / (self.total_value + 1e-6))
@@ -137,7 +127,7 @@ class Agent:
                 chosen = self.candidates[0][2]
             return chosen.copy()
 
-        # Greedy fallback
+        # Greedy fallback: start with all useful items, drop cheapest
         offer = [0] * self.n
         for i, c in enumerate(self.counts):
             offer[i] = c if self.values[i] > 0 else 0
@@ -175,7 +165,7 @@ class Agent:
             keep = self.counts[i] - o[i]
             give = o[i]
             if keep > give:
-                self.opp_w[i] += 0.6
+                self.opp_w[i] += 0.5
             elif give > keep:
                 self.opp_w[i] = max(0.1, self.opp_w[i] * 0.9)
 
@@ -201,11 +191,13 @@ class Agent:
         if o is not None:
             if incoming_val >= self._accept_threshold(last_turn):
                 return None
-            # Near the end, accept best feasible seen
-            if last_turn and incoming_val > 0 and incoming_val >= max(self.best_seen, 0.4 * self.total_value):
-                return None
-            # Small progress left and offer is decent
-            if self._progress() > 0.75 and incoming_val >= 0.5 * self.total_value:
+            # Near the end, accept decent deals
+            if last_turn and incoming_val > 0:
+                # accept if better than best seen and not awful
+                if incoming_val >= max(self.best_seen, 0.35 * self.total_value):
+                    return None
+            # If we are late and offer is OK
+            if self._progress() > 0.8 and incoming_val >= 0.5 * self.total_value:
                 return None
 
         # Build counter‑offer

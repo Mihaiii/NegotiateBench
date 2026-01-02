@@ -56,7 +56,8 @@ class Agent:
         is_penultimate = current_turn == self.max_turns - 1
         progress = current_turn / self.max_turns if self.max_turns > 0 else 1.0
         v_partner = self.estimate_v_partner()
-        power = 5 if self.has_advantage else 2
+        power = 5 if self.has_advantage else 1
+        g = progress ** power
         if is_last_turn:
             min_accept = 0
             partner_threshold = 0
@@ -64,11 +65,10 @@ class Agent:
             min_accept = self.total * 0.9
             partner_threshold = 0
         else:
-            g = progress ** power
             if self.has_advantage:
                 my_share_frac = 0.7 + 0.3 * g
             else:
-                my_share_frac = 0.8 - 0.3 * g
+                my_share_frac = 0.65 - 0.35 * g
             min_accept = self.total * my_share_frac
             partner_threshold = self.total * (1 - my_share_frac)
         if o is not None:

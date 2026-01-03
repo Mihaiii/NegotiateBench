@@ -11,7 +11,7 @@ class Agent:
         self.counts = counts
         self.values = values
         self.n = len(counts)
-        self.max_turns = max_rounds  # number of times offer() can be called
+        self.max_turns = max_rounds  # number of times offer() can be called for this agent
         self.turn = 0
 
         self.total_value = sum(c * v for c, v in zip(counts, values))
@@ -28,12 +28,12 @@ class Agent:
         space = 1
         for c in counts:
             space *= (c + 1)
-            if space > 300_000:
+            if space > 250_000:
                 break
-        if space <= 300_000:
+        if space <= 250_000:
             tmp: List[tuple[int, float, List[int]]] = []
             self._enum(0, [0] * self.n, tmp)
-            # Keep a diverse but limited set: pareto on my value then by opp est
+            # Pareto filter on my value then opponent estimate
             tmp.sort(key=lambda x: (-x[0], -x[1]))
             filtered = []
             best_ov = -1.0
@@ -41,7 +41,8 @@ class Agent:
                 if ov > best_ov:
                     filtered.append((mv, ov, off))
                     best_ov = ov
-            self.candidates = filtered[:600] if len(filtered) > 600 else filtered
+            # Limit size to keep selection fast
+            self.candidates = filtered[:800] if len(filtered) > 800 else filtered
 
     # ---------- helpers ----------
     def _enum(self, idx: int, cur: List[int], acc: List[tuple[int, float, List[int]]]):
@@ -71,7 +72,7 @@ class Agent:
         if self.total_value == 0:
             return 0.0
         prog = self._progress()
-        start, end = 0.9, 0.45
+        start, end = 0.85, 0.45
         th = self.total_value * (start - (start - end) * prog)
         if last_turn:
             th = min(th, 0.35 * self.total_value)
@@ -102,21 +103,22 @@ class Agent:
         incoming: Optional[List[int]],
     ) -> List[int]:
         prog = self._progress()
-        w_my = 0.65 + 0.2 * (1 - prog)  # early: more selfish; late: more balanced
-        w_op = 1.0 - w_my
-        dist_weight = 0.2 * prog
+        # Early: more selfish; late: more balanced
+        alpha = 0.65 + 0.25 * (1 - prog)
+        beta = 1.0 - alpha
+        dist_weight = 0.25 * prog
 
         if self.candidates:
             chosen = None
             best_score = -1e18
             inc = incoming
+            tv = self.total_value + 1e-6
             for mv, ov, off in self.candidates:
                 if forbid is not None and off == forbid:
                     continue
-                # ensure all items allocated: already true by enumeration
                 if mv < target and prog < 0.9:
                     continue
-                score = w_my * (mv / (self.total_value + 1e-6)) + w_op * (ov / (self.total_value + 1e-6))
+                score = alpha * (mv / tv) + beta * (ov / tv)
                 if inc is not None:
                     dist = sum(abs(off[i] - inc[i]) for i in range(self.n))
                     score -= dist_weight * dist / max(1, sum(self.counts))
@@ -127,12 +129,13 @@ class Agent:
                 chosen = self.candidates[0][2]
             return chosen.copy()
 
-        # Greedy fallback: start with all useful items, drop cheapest
+        # Greedy fallback: start with all useful items, drop cheapest for opponent
         offer = [0] * self.n
         for i, c in enumerate(self.counts):
             offer[i] = c if self.values[i] > 0 else 0
         cur_val = self._value(offer)
 
+        # Add missing value if below target (should not happen with initial all positives)
         if cur_val < target:
             items = []
             for i in range(self.n):
@@ -146,6 +149,7 @@ class Agent:
                 if cur_val >= target:
                     break
 
+        # Concede items with low my/opp ratio while staying above target
         if cur_val > target:
             for i in self._concession_order():
                 while offer[i] > 0 and cur_val - self.values[i] >= target:
@@ -165,7 +169,7 @@ class Agent:
             keep = self.counts[i] - o[i]
             give = o[i]
             if keep > give:
-                self.opp_w[i] += 0.5
+                self.opp_w[i] += 0.6
             elif give > keep:
                 self.opp_w[i] = max(0.1, self.opp_w[i] * 0.9)
 
@@ -191,13 +195,11 @@ class Agent:
         if o is not None:
             if incoming_val >= self._accept_threshold(last_turn):
                 return None
-            # Near the end, accept decent deals
-            if last_turn and incoming_val > 0:
-                # accept if better than best seen and not awful
-                if incoming_val >= max(self.best_seen, 0.35 * self.total_value):
-                    return None
-            # If we are late and offer is OK
-            if self._progress() > 0.8 and incoming_val >= 0.5 * self.total_value:
+            # Late: be willing to take moderate deals
+            if self._progress() > 0.85 and incoming_val >= 0.5 * self.total_value:
+                return None
+            # Last turn: avoid no-deal
+            if last_turn and incoming_val >= max(0.3 * self.total_value, 1):
                 return None
 
         # Build counter‑offer

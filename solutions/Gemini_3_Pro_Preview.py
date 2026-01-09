@@ -8,122 +8,105 @@ class Agent:
         self.max_rounds = max_rounds
         self.total_turns = max_rounds * 2
         
-        self.n_types = len(counts)
+        self.turn_count = 0
         self.my_max_val = sum(c * v for c, v in zip(counts, values))
+        self.n_types = len(counts)
         
         # Opponent Value Estimation
-        # Initialize with 1.0 (neutral assumption). We will learn and normalize.
-        self.opp_val_est = [1.0 for _ in range(self.n_types)]
-        
-        self.turn_count = 0
-
-    def normalize_opp_est(self):
-        # We assume opponent's total value is equal to ours (from problem statement).
-        # We scale our estimates of their item values so the total matches this sum.
-        est_total = sum(self.counts[i] * self.opp_val_est[i] for i in range(self.n_types))
-        if est_total > 1e-6:
-            factor = self.my_max_val / est_total
-            self.opp_val_est = [w * factor for w in self.opp_val_est]
-
-    def update_opp_est(self, opp_offer: list[int]):
-        # The opponent offered me 'opp_offer'. They kept 'counts - opp_offer'.
-        # Items they keep represent their preferences.
-        kept = [self.counts[i] - opp_offer[i] for i in range(self.n_types)]
-        
-        for i in range(self.n_types):
-            if kept[i] > 0:
-                # Heuristic: Add weight proportional to how many they kept.
-                # This increases the estimated value of items they are reluctant to give up.
-                self.opp_val_est[i] += kept[i]
-                
-        self.normalize_opp_est()
+        # Initialize with 1.0 (neutral assumption).
+        self.opp_val_est = [1.0] * self.n_types
 
     def offer(self, o: list[int] | None) -> list[int] | None:
         # Calculate global turn index: 0 to total_turns - 1
         global_turn = 2 * self.turn_count + self.me
         turns_left = self.total_turns - global_turn
+        progress = global_turn / self.total_turns
+
+        # --- 1. Update Opponent Model ---
+        if o is not None:
+            # Determine which items the opponent kept
+            kept = [self.counts[i] - o[i] for i in range(self.n_types)]
+            for i, k in enumerate(kept):
+                if k > 0:
+                    # Heuristic: Add weight proportional to retention
+                    # If they keep it, they want it.
+                    self.opp_val_est[i] += k
         
-        offer_val = 0
+        # Normalize estimates: Assume their total value roughly equals ours
+        est_total = sum(self.counts[i] * self.opp_val_est[i] for i in range(self.n_types))
+        if est_total > 1e-6:
+            norm_factor = self.my_max_val / est_total
+            self.opp_val_est = [w * norm_factor for w in self.opp_val_est]
+
+        # --- 2. Evaluate Incoming Offer ---
         if o is not None:
             offer_val = sum(o[i] * self.values[i] for i in range(self.n_types))
-            self.update_opp_est(o)
             
-        # --- 1. Acceptance Logic for Deadline ---
-        # If this is the absolute last turn (I am Player 2 in the last round),
-        # I must accept any valid offer (even low value) rather than getting 0.
-        if turns_left == 1:
-            if o is not None:
+            # LAST TURN SAFETY (If I am P2 responding to the final offer)
+            # If I reject here, game ends and we get 0. Rationally accept anything > 0.
+            if turns_left == 1:
+                if offer_val > 0:
+                    return None
+            
+            # Acceptance Threshold Logic
+            # Start strict (0.98), decay to around 0.60
+            threshold_frac = 0.98 - (0.38 * (progress ** 2))
+            threshold_frac = max(threshold_frac, 0.6)
+            
+            # Exceptional offer acceptance or threshold met
+            if offer_val >= self.my_max_val * threshold_frac:
                 return None
-                
-        # --- 2. Variable Target Calculation ---
-        # Strategy: Start high, concede gradually, then drop to "fair" deal near deadline.
-        # progress goes from 0.0 (start) to 1.0 (end)
-        progress = global_turn / self.total_turns
+            if offer_val >= self.my_max_val * 0.95:
+                # Always accept nearly perfect deals
+                return None
+
+        # --- 3. Construct Counter-Offer ---
+        # Determine Target Value for Me
+        # Start at 100%, decay linearly to 70%
+        target_frac = 1.0 - (0.3 * progress)
         
-        if progress < 0.2:
-            # Exploration phase: Ask for near maximum
-            target_pct = 1.0
-        elif progress < 0.8:
-            # Trading phase: Linear concession from 1.0 down to 0.7
-            x = (progress - 0.2) / 0.6
-            target_pct = 1.0 - 0.3 * x
-        else:
-            # Deadline phase: Linear concession from 0.7 down to 0.55
-            x = (progress - 0.8) / 0.2
-            target_pct = 0.7 - 0.15 * x
-            
-        # Deadline Override:
-        # If I am making the final offer of the game (turns_left=2), ensure it's attractive enough 
-        # to prevent the opponent (who speaks next) from rejecting and ending the game.
+        # End-game override:
+        # If I am P1 making the last proposal (turns_left=2), I must be reasonable 
+        # to prevent P2 from risking a crash, or trigger their acceptance logic.
         if turns_left <= 2:
-            target_pct = min(target_pct, 0.60)
+            target_frac = 0.55
             
-        target_val = int(self.my_max_val * target_pct)
+        target_val = int(target_frac * self.my_max_val)
         
-        # --- 3. Acceptance Check ---
-        if o is not None:
-            # Accept if offer meets our dynamic target
-            if offer_val >= target_val:
-                return None
-            # Always accept if offer is extremely good (e.g., 95% of max possible)
-            if offer_val >= 0.95 * self.my_max_val:
-                return None
-                
-        # --- 4. Construct Efficient Counter-Offer ---
-        # Loop through items and pick those that give ME the most value per unit of cost to OPPONENT.
-        # Ratio = MyValue / OpponentEstimatedValue
-        # This Greedy approach approximates the Efficient Frontier.
+        # Build bundle using Efficiency Ratio: MyValue / OpponentCost
+        # We want to gain `target_val` using items that cost the opponent the least.
+        # Ratio = MyValue / OppEst. Higher is better for us (high gain, low pain).
         
-        items_to_pick = []
+        items_ranking = []
         for i in range(self.n_types):
-            count = self.counts[i]
-            val_me = self.values[i]
-            val_opp = self.opp_val_est[i]
+            my_v = self.values[i]
+            opp_v = self.opp_val_est[i] + 1e-5 # Avoid division by zero
             
-            # Efficiency metric: Value I gain / Value they lose
-            # Add small epsilon to prevent division by zero
-            eff = val_me / (val_opp + 1e-5)
+            ratio = my_v / opp_v
+            # Add slight random noise to break ties non-deterministically
+            ratio *= random.uniform(0.99, 1.01)
             
-            # Add tiny noise to handle ties and prevent deterministic loops
-            eff *= random.uniform(0.999, 1.001)
-            
-            # Treat each unit of an item type individually
-            for _ in range(count):
-                items_to_pick.append({'idx': i, 'val': val_me, 'eff': eff})
-                
-        # Sort by efficiency descending (My best items first)
-        items_to_pick.sort(key=lambda x: x['eff'], reverse=True)
+            for _ in range(self.counts[i]):
+                items_ranking.append({
+                    'id': i,
+                    'val': my_v,
+                    'ratio': ratio
+                })
         
-        my_counter = [0] * self.n_types
+        # Sort by efficiency (Descending)
+        items_ranking.sort(key=lambda x: x['ratio'], reverse=True)
+        
+        my_offer = [0] * self.n_types
         current_val = 0
         
-        for item in items_to_pick:
-            # Stop taking items once we hit our target value
-            # This leaves the rest for the opponent, maximizing their satisfaction
+        for item in items_ranking:
+            # Stop if we reached our target value
             if current_val >= target_val:
                 break
-            my_counter[item['idx']] += 1
+            
+            # Add item to my stash
+            my_offer[item['id']] += 1
             current_val += item['val']
             
         self.turn_count += 1
-        return my_counter
+        return my_offer

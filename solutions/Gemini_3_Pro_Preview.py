@@ -8,133 +8,149 @@ class Agent:
         self.max_rounds = max_rounds
         self.total_turns = max_rounds * 2
         
-        self.turn_count = 0
         self.my_max_val = sum(c * v for c, v in zip(counts, values))
         self.n = len(counts)
         
-        # Opponent model: track cumulative counts of items the opponent KEPT
-        # to estimate their valuation.
-        self.opp_kept_history = [0] * self.n
-        self.opp_moves = 0
+        # Track opponent behavior: how many of each item they KEPT in previous turns
+        self.opp_kept_sum = [0] * self.n
+        # Number of offers received from opponent
+        self.opp_offers_count = 0
+        
+        # My turn counter (local)
+        self.my_turns_taken = 0
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        # Calculate global turn index: 0, 1, 2 ... total_turns-1
-        current_turn = self.turn_count * 2 + self.me
-        turns_left = self.total_turns - current_turn
+        # Calculate negotiation progress
+        current_global_turn = self.my_turns_taken * 2 + self.me
+        turns_left = self.total_turns - current_global_turn
         
-        # --- 1. Update Opponent Model ---
+        val_o = -1
         if o is not None:
-            self.opp_moves += 1
-            # o is what they offer ME. They keep (counts - o).
-            kept = [self.counts[i] - o[i] for i in range(self.n)]
+            self.opp_offers_count += 1
+            # Infer opponent values: they keep items they want.
+            # Record what they kept (history tracking).
             for i in range(self.n):
-                self.opp_kept_history[i] += kept[i]
-        
-        # Estimate Opponent Weights
-        # Higher weight = Opponent wants this more.
-        opp_weights = []
-        for i in range(self.n):
-            if self.counts[i] == 0:
-                opp_weights.append(0.0)
-                continue
-                
-            # If no history, assume neutral (1.0)
-            if self.opp_moves == 0:
-                opp_weights.append(1.0)
-                continue
+                kept_qty = self.counts[i] - o[i]
+                self.opp_kept_sum[i] += kept_qty
             
-            # Retention frequency (0.0 to 1.0)
-            # freq = 1.0 means they kept ALL of this type every time.
-            freq = self.opp_kept_history[i] / (self.opp_moves * self.counts[i])
-            
-            # Non-linear weighting to emphasize high retention items
-            # Weight ranges approx 0.1 to 10
-            w = 0.1 + (freq * freq) * 10
-            opp_weights.append(w)
-            
-        # --- 2. Evaluate Incoming Offer ---
-        if o is not None:
+            # Calculate value of their offer to me
             val_o = sum(o[i] * self.values[i] for i in range(self.n))
-            
-            # Edge Case: Me (P2) Last Turn. 
-            # If I reject, we get 0. Rationally accept anything > 0.
-            if turns_left == 1:
-                if val_o > 0:
-                    return None
-            
-            # Standard Acceptance Logic
-            # Curve: Accept ~95% at start, dropping to ~55% by end
-            progress = current_turn / self.total_turns
-            thresh_frac = 0.95 - 0.4 * progress
-            
-            # Safety for "Bulldozer" opponents: 
-            # In last 4 turns (2 rounds), become very agreeable to avoid crash
-            if turns_left <= 4:
-                 thresh_frac = min(thresh_frac, 0.55)
-            
-            # Lower bound to strictly avoid bad deals until the very end
-            thresh_frac = max(thresh_frac, 0.4)
-            
-            # Accept if threshold met
-            if val_o >= int(self.my_max_val * thresh_frac):
+        
+        # --- Acceptance Strategy ---
+        
+        # 1. Last Ditch Logic:
+        # If we are the second mover in the very last round (Turn 2*rounds - 1),
+        # returning a counter-offer results in No Deal (0 profit).
+        # We MUST accept if the offer has any positive value.
+        if turns_left == 1:
+            if o is not None and val_o > 0:
                 return None
-                
-            # Instant accept for near-perfect offers regardless of time
-            if val_o >= self.my_max_val * 0.98:
-                return None
+        
+        # 2. Reservation Price Curve
+        # t goes from 0.0 (start) to 1.0 (end)
+        t = current_global_turn / self.total_turns
+        
+        # Curve strategy:
+        # 0% - 20%: Stay firm at 100% to anchor.
+        # 20% - 80%: Linear decay from 100% to 70%.
+        # 80% - 100%: Drop from 70% to 55%.
+        if t < 0.2:
+            curve = 1.0
+        elif t < 0.8:
+            # Normalized progress in this segment
+            p = (t - 0.2) / 0.6
+            curve = 1.0 - 0.3 * p
+        else:
+            # End game concession
+            p = (t - 0.8) / 0.2
+            curve = 0.7 - 0.15 * p
+            
+        # Hard floor for reservation percentage (never go below 45% unless desperate)
+        curve = max(curve, 0.45) 
+        
+        reservation = int(self.my_max_val * curve)
+        if self.my_max_val > 0:
+            reservation = max(reservation, 1)
+        
+        # Accept if offer meets our current reservation criteria
+        if o is not None and val_o >= reservation:
+            return None
+            
+        # --- Counter-Offer Strategy ---
+        
+        # Set a target slightly higher than reservation to allow for negotiation room
+        target = int(reservation * 1.05)
+        
+        # If we are effectively in the last round (turns_left <= 2),
+        # stop posturing and aim exactly for reservation to maximize deal probability.
+        if turns_left <= 2:
+            target = reservation
+            
+        target = min(target, self.my_max_val)
 
-        # --- 3. Construct Counter-Offer ---
-        
-        # Target Value Logic: Decay from 100% to ~60%
-        progress = current_turn / self.total_turns
-        target_frac = 1.0 - 0.35 * progress
-        
-        # End-game concession: If I am proposing in the last few turns,
-        # I must offer a deal the opponent is likely to accept (sweetener).
-        if turns_left <= 4:
-            target_frac = min(target_frac, 0.60)
-            
-        target_val = int(self.my_max_val * target_frac)
-        
-        # Build bundle using Efficiency Ratio: MyValue / OpponentWeight
-        # We pick items that are valuable to me but cheap/unwanted by opponent.
-        items = []
+        # Build bundle priorities based on Efficiency Ratio
+        # Efficiency = MyValue / LikelyOpponentValue
+        # LikelyOpponentValue is estimated via the frequency they kept the item.
+        item_scores = []
         for i in range(self.n):
-            if self.counts[i] > 0:
-                # Add small epsilon to avoid div by zero
-                # Add random noise for tie-breaking
-                w = opp_weights[i] + 1e-6
-                eff = self.values[i] / w
-                eff *= random.uniform(0.99, 1.01)
-                
-                items.append({'i': i, 'val': self.values[i], 'c': self.counts[i], 'eff': eff})
+            if self.counts[i] == 0: continue
+            
+            # If I don't value it, rank it lowest (score -1). 
+            # We generally shouldn't ask for items we don't value unless necessary.
+            if self.values[i] == 0:
+                item_scores.append((-1.0, i))
+                continue
+            
+            # Estimate opponent desire (0.0 to 1.0)
+            if self.opp_offers_count == 0:
+                opp_freq = 0.5
+            else:
+                total_seen = self.opp_offers_count * self.counts[i]
+                opp_freq = self.opp_kept_sum[i] / total_seen if total_seen > 0 else 0.5
+            
+            # Denom: Map 0.0->0.1 (low desire) to 1.0->1.1 (high desire)
+            denom = 0.1 + opp_freq
+            eff = self.values[i] / denom
+            
+            # Add slight noise to randomize behavior on identical items
+            eff *= random.uniform(0.98, 1.02)
+            
+            item_scores.append((eff, i))
+            
+        # Sort items: highest efficiency first
+        item_scores.sort(key=lambda x: x[0], reverse=True)
         
-        # Sort descending by efficiency
-        items.sort(key=lambda x: x['eff'], reverse=True)
-        
-        my_offer_counts = [0] * self.n
+        # Construct Proposal using Greedy approach (Knapsack-like)
+        my_proposal = [0] * self.n
         current_sum = 0
         
-        # Greedy knapsack fill
-        for item in items:
-            if current_sum >= target_val:
-                break
-                
-            idx = item['i']
-            val = item['val']
-            cnt = item['c']
+        for score, i in item_scores:
+            if score < 0: continue # Skip 0-value items
             
-            if val > 0:
-                needed = target_val - current_sum
-                # Ceil division to get exact count needed
-                take = (needed + val - 1) // val
-                take = min(take, cnt)
-                
-                my_offer_counts[idx] += take
-                current_sum += take * val
-            else:
-                # Do not take 0 value items (leave them for opponent as sweetener)
-                pass
-                
-        self.turn_count += 1
-        return my_offer_counts
+            count_avail = self.counts[i]
+            val = self.values[i]
+            
+            # We want to reach 'target' value
+            needed = target - current_sum
+            if needed <= 0:
+                break
+            
+            # Take as many as needed to cover the gap
+            # ceil(needed / val)
+            take = (needed + val - 1) // val
+            take = min(take, count_avail)
+            
+            my_proposal[i] = take
+            current_sum += take * val
+            
+        # --- Final Sanity Check ---
+        # If the best offer we could construct is actually worse (or equal) to what 
+        # the opponent just offered, we should simply accept their offer.
+        # This prevents rejecting a 22-value offer to propose a 20-value counter-offer
+        # due to curve decay or greedy imperfections.
+        if o is not None:
+            if current_sum <= val_o:
+                return None
+        
+        self.my_turns_taken += 1
+        return my_proposal

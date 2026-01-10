@@ -10,103 +10,131 @@ class Agent:
         
         self.turn_count = 0
         self.my_max_val = sum(c * v for c, v in zip(counts, values))
-        self.n_types = len(counts)
+        self.n = len(counts)
         
-        # Opponent Value Estimation
-        # Initialize with 1.0 (neutral assumption).
-        self.opp_val_est = [1.0] * self.n_types
+        # Opponent model: track cumulative counts of items the opponent KEPT
+        # to estimate their valuation.
+        self.opp_kept_history = [0] * self.n
+        self.opp_moves = 0
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        # Calculate global turn index: 0 to total_turns - 1
-        global_turn = 2 * self.turn_count + self.me
-        turns_left = self.total_turns - global_turn
-        progress = global_turn / self.total_turns
-
+        # Calculate global turn index: 0, 1, 2 ... total_turns-1
+        current_turn = self.turn_count * 2 + self.me
+        turns_left = self.total_turns - current_turn
+        
         # --- 1. Update Opponent Model ---
         if o is not None:
-            # Determine which items the opponent kept
-            kept = [self.counts[i] - o[i] for i in range(self.n_types)]
-            for i, k in enumerate(kept):
-                if k > 0:
-                    # Heuristic: Add weight proportional to retention
-                    # If they keep it, they want it.
-                    self.opp_val_est[i] += k
+            self.opp_moves += 1
+            # o is what they offer ME. They keep (counts - o).
+            kept = [self.counts[i] - o[i] for i in range(self.n)]
+            for i in range(self.n):
+                self.opp_kept_history[i] += kept[i]
         
-        # Normalize estimates: Assume their total value roughly equals ours
-        est_total = sum(self.counts[i] * self.opp_val_est[i] for i in range(self.n_types))
-        if est_total > 1e-6:
-            norm_factor = self.my_max_val / est_total
-            self.opp_val_est = [w * norm_factor for w in self.opp_val_est]
-
+        # Estimate Opponent Weights
+        # Higher weight = Opponent wants this more.
+        opp_weights = []
+        for i in range(self.n):
+            if self.counts[i] == 0:
+                opp_weights.append(0.0)
+                continue
+                
+            # If no history, assume neutral (1.0)
+            if self.opp_moves == 0:
+                opp_weights.append(1.0)
+                continue
+            
+            # Retention frequency (0.0 to 1.0)
+            # freq = 1.0 means they kept ALL of this type every time.
+            freq = self.opp_kept_history[i] / (self.opp_moves * self.counts[i])
+            
+            # Non-linear weighting to emphasize high retention items
+            # Weight ranges approx 0.1 to 10
+            w = 0.1 + (freq * freq) * 10
+            opp_weights.append(w)
+            
         # --- 2. Evaluate Incoming Offer ---
         if o is not None:
-            offer_val = sum(o[i] * self.values[i] for i in range(self.n_types))
+            val_o = sum(o[i] * self.values[i] for i in range(self.n))
             
-            # LAST TURN SAFETY (If I am P2 responding to the final offer)
-            # If I reject here, game ends and we get 0. Rationally accept anything > 0.
+            # Edge Case: Me (P2) Last Turn. 
+            # If I reject, we get 0. Rationally accept anything > 0.
             if turns_left == 1:
-                if offer_val > 0:
+                if val_o > 0:
                     return None
             
-            # Acceptance Threshold Logic
-            # Start strict (0.98), decay to around 0.60
-            threshold_frac = 0.98 - (0.38 * (progress ** 2))
-            threshold_frac = max(threshold_frac, 0.6)
+            # Standard Acceptance Logic
+            # Curve: Accept ~95% at start, dropping to ~55% by end
+            progress = current_turn / self.total_turns
+            thresh_frac = 0.95 - 0.4 * progress
             
-            # Exceptional offer acceptance or threshold met
-            if offer_val >= self.my_max_val * threshold_frac:
+            # Safety for "Bulldozer" opponents: 
+            # In last 4 turns (2 rounds), become very agreeable to avoid crash
+            if turns_left <= 4:
+                 thresh_frac = min(thresh_frac, 0.55)
+            
+            # Lower bound to strictly avoid bad deals until the very end
+            thresh_frac = max(thresh_frac, 0.4)
+            
+            # Accept if threshold met
+            if val_o >= int(self.my_max_val * thresh_frac):
                 return None
-            if offer_val >= self.my_max_val * 0.95:
-                # Always accept nearly perfect deals
+                
+            # Instant accept for near-perfect offers regardless of time
+            if val_o >= self.my_max_val * 0.98:
                 return None
 
         # --- 3. Construct Counter-Offer ---
-        # Determine Target Value for Me
-        # Start at 100%, decay linearly to 70%
-        target_frac = 1.0 - (0.3 * progress)
         
-        # End-game override:
-        # If I am P1 making the last proposal (turns_left=2), I must be reasonable 
-        # to prevent P2 from risking a crash, or trigger their acceptance logic.
-        if turns_left <= 2:
-            target_frac = 0.55
+        # Target Value Logic: Decay from 100% to ~60%
+        progress = current_turn / self.total_turns
+        target_frac = 1.0 - 0.35 * progress
+        
+        # End-game concession: If I am proposing in the last few turns,
+        # I must offer a deal the opponent is likely to accept (sweetener).
+        if turns_left <= 4:
+            target_frac = min(target_frac, 0.60)
             
-        target_val = int(target_frac * self.my_max_val)
+        target_val = int(self.my_max_val * target_frac)
         
-        # Build bundle using Efficiency Ratio: MyValue / OpponentCost
-        # We want to gain `target_val` using items that cost the opponent the least.
-        # Ratio = MyValue / OppEst. Higher is better for us (high gain, low pain).
+        # Build bundle using Efficiency Ratio: MyValue / OpponentWeight
+        # We pick items that are valuable to me but cheap/unwanted by opponent.
+        items = []
+        for i in range(self.n):
+            if self.counts[i] > 0:
+                # Add small epsilon to avoid div by zero
+                # Add random noise for tie-breaking
+                w = opp_weights[i] + 1e-6
+                eff = self.values[i] / w
+                eff *= random.uniform(0.99, 1.01)
+                
+                items.append({'i': i, 'val': self.values[i], 'c': self.counts[i], 'eff': eff})
         
-        items_ranking = []
-        for i in range(self.n_types):
-            my_v = self.values[i]
-            opp_v = self.opp_val_est[i] + 1e-5 # Avoid division by zero
-            
-            ratio = my_v / opp_v
-            # Add slight random noise to break ties non-deterministically
-            ratio *= random.uniform(0.99, 1.01)
-            
-            for _ in range(self.counts[i]):
-                items_ranking.append({
-                    'id': i,
-                    'val': my_v,
-                    'ratio': ratio
-                })
+        # Sort descending by efficiency
+        items.sort(key=lambda x: x['eff'], reverse=True)
         
-        # Sort by efficiency (Descending)
-        items_ranking.sort(key=lambda x: x['ratio'], reverse=True)
+        my_offer_counts = [0] * self.n
+        current_sum = 0
         
-        my_offer = [0] * self.n_types
-        current_val = 0
-        
-        for item in items_ranking:
-            # Stop if we reached our target value
-            if current_val >= target_val:
+        # Greedy knapsack fill
+        for item in items:
+            if current_sum >= target_val:
                 break
+                
+            idx = item['i']
+            val = item['val']
+            cnt = item['c']
             
-            # Add item to my stash
-            my_offer[item['id']] += 1
-            current_val += item['val']
-            
+            if val > 0:
+                needed = target_val - current_sum
+                # Ceil division to get exact count needed
+                take = (needed + val - 1) // val
+                take = min(take, cnt)
+                
+                my_offer_counts[idx] += take
+                current_sum += take * val
+            else:
+                # Do not take 0 value items (leave them for opponent as sweetener)
+                pass
+                
         self.turn_count += 1
-        return my_offer
+        return my_offer_counts

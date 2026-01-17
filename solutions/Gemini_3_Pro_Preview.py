@@ -1,139 +1,158 @@
+import itertools
+import random
+
 class Agent:
     def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
         self.me = me
         self.counts = counts
         self.values = values
         self.max_rounds = max_rounds
-        self.n = len(counts)
+        self.types = len(counts)
         self.total_val = sum(c * v for c, v in zip(counts, values))
         
-        # Opponent modeling: Frequency of kept items
-        self.opp_kept_sum = [0] * self.n
-        self.turns_seen = 0
+        # Opponent modeling: Track items opponent 'kept' (requested items)
+        # We assume if they offer O to us, they keep (Counts - O).
+        self.opp_req_counts = [0] * self.types
+        self.turns_observed = 0
         
-        self.my_turn_idx = 0
+        # Complexity check for proposal generation
+        # Calculate state space size to decide between Brute Force and Greedy
+        self.space_size = 1
+        for c in counts:
+            self.space_size *= (c + 1)
+        self.use_brute_force = self.space_size <= 50000
+        
+        self.turn_idx = 0 
 
-    def get_opp_vals(self):
-        # Estimate opponent values proportional to keep frequency
-        raw = []
-        for i in range(self.n):
-            # Bayesian smoothing: (kept + 1) / (observed_total + 2)
-            # observed_total is turns_seen * count[i]
-            denom = self.turns_seen * self.counts[i] + 2 if self.counts[i] > 0 else 1
-            prob = (self.opp_kept_sum[i] + 1) / denom
-            raw.append(prob)
-            
+    def get_opp_est_values(self):
+        # Estimate opponent values based on frequency of keeping items
+        est = []
+        for i in range(self.types):
+            # Probability that opponent wants item i approx = (Kept / Opportunities)
+            denom = self.turns_observed * self.counts[i]
+            if denom == 0:
+                prob = 0.5
+            else:
+                prob = self.opp_req_counts[i] / denom
+            # Add small baseline to prevent zero-value assumptions and issues with division
+            est.append(prob + 0.1)
+        
         # Normalize estimates so their total value matches mine (Symmetry Assumption)
-        s = sum(c * v for c, v in zip(self.counts, raw))
+        s = sum(c * v for c, v in zip(self.counts, est))
         if s > 1e-9:
             factor = self.total_val / s
-            return [r * factor for r in raw]
-        else:
-            return [1.0] * self.n
+            return [v * factor for v in est]
+        return [1.0] * self.types
 
-    def get_pareto(self, opp_vals):
-        # Generate Pareto frontier using greedy efficiency metric (MyVal / OppVal)
-        items = []
-        for i in range(self.n):
-            vm, vo = self.values[i], opp_vals[i]
-            # Avoid division by zero
-            ratio = vm / (vo + 1e-9)
-            items.append({'i': i, 'eff': ratio, 'vm': vm, 'vo': vo, 'c': self.counts[i]})
+    def generate_proposals(self, opp_vals):
+        # Generate possible splits. 
+        # Returns list of dicts: {'get': [counts_for_me], 'vm': my_val, 'vo': est_opp_val}
+        proposals = []
         
-        # Sort items by efficiency descending (best for Me)
-        items.sort(key=lambda x: x['eff'], reverse=True)
-        
-        frontier = []
-        cur_counts = [0] * self.n
-        cur_m = 0
-        cur_o = self.total_val # Opponent starts with assumed theoretical max (everything)
-        
-        # Point 0: I take nothing
-        frontier.append({'c': list(cur_counts), 'm': cur_m, 'o': cur_o})
-        
-        # Greedily add items to my bundle
-        for item in items:
-            idx = item['i']
-            for _ in range(item['c']):
-                cur_counts[idx] += 1
-                cur_m += item['vm']
-                cur_o -= item['vo']
-                frontier.append({'c': list(cur_counts), 'm': cur_m, 'o': cur_o})
-        return frontier
+        if self.use_brute_force:
+            # Full enumeration of the state space
+            ranges = [range(c + 1) for c in self.counts]
+            for p in itertools.product(*ranges):
+                o_me = list(p)
+                vm = sum(o_me[i] * self.values[i] for i in range(self.types))
+                vo = sum((self.counts[i] - o_me[i]) * opp_vals[i] for i in range(self.types))
+                proposals.append({'get': o_me, 'vm': vm, 'vo': vo})
+        else:
+            # Greedy Heuristic for large state spaces
+            # Sort object types by efficiency (MyValue / OppValue)
+            ratios = []
+            for i in range(self.types):
+                # Add epsilon to prevent division by zero
+                ratios.append({'i': i, 'r': self.values[i] / (opp_vals[i] + 1e-9)})
+            ratios.sort(key=lambda x: x['r'], reverse=True)
+            
+            # Walk the efficient frontier
+            cur = [0] * self.types
+            vm = 0
+            vo = sum(c * v for c, v in zip(self.counts, opp_vals))
+            proposals.append({'get': list(cur), 'vm': vm, 'vo': vo})
+            
+            for r in ratios:
+                idx = r['i']
+                for _ in range(self.counts[idx]):
+                    cur[idx] += 1
+                    vm += self.values[idx]
+                    vo -= opp_vals[idx] 
+                    proposals.append({'get': list(cur), 'vm': vm, 'vo': vo})
+                    
+        return proposals
 
     def offer(self, o: list[int] | None) -> list[int] | None:
+        total_turns = self.max_rounds * 2
+        my_turn_global = self.turn_idx * 2 + self.me
+        turns_left = total_turns - my_turn_global
+
+        # 1. Update Opponent Model
         if o:
-            self.turns_seen += 1
-            # o is what "I" receive. Opponent kept (counts - o).
-            for i in range(self.n):
-                self.opp_kept_sum[i] += (self.counts[i] - o[i])
+            self.turns_observed += 1
+            for i in range(self.types):
+                self.opp_req_counts[i] += (self.counts[i] - o[i])
 
-        # Calculate current global turn index (0 to 2*max_rounds - 1)
-        curr_global_turn = self.my_turn_idx * 2 + self.me
-        turns_left = (self.max_rounds * 2) - curr_global_turn
-        
-        opp_vals = self.get_opp_vals()
-        val_o = sum(x * v for x, v in zip(o, self.values)) if o else 0
-        frontier = self.get_pareto(opp_vals)
+        val_o = sum(o[i] * self.values[i] for i in range(self.types)) if o else 0
 
-        # --- Acceptance Logic ---
-        if o:
-            # Player 1 Last Turn: Ultimatum received.
-            # Rejecting means 0 for both. Accepting > 0 is rational.
-            if turns_left == 1:
-                return None 
+        # --- LAST TURN DECISION (RECEIVER) ---
+        # If I am receiving the very last offer of the game, I must accept anything > 0.
+        if turns_left == 1:
+            return None
 
-            # Calculate Dynamic Target
-            progress = curr_global_turn / (self.max_rounds * 2)
-            # Aspiration curve: 100% -> 75% -> 55%
-            # Gently concede from "I want all" to "Fair split"
-            if progress < 0.8:
-                f = 1.0 - (progress * 0.3) # 1.0 to 0.76
-            else:
-                # 0.76 to 0.55 fast concession in end game
-                f = 0.76 - ((progress - 0.8) / 0.2) * 0.21
-            
-            # Floor target at 55% of total value to ensure decent deal, 
-            # but allow dropping near 50% implicitly via Nash checks.
-            target = max(self.total_val * 0.55, self.total_val * f)
-            
-            # Find approximate Nash point (max product of utilities)
-            nash = max(frontier, key=lambda x: x['m'] * max(0, x['o']))
-            
-            # Acceptance conditions
-            if val_o >= target: return None
-            # If offer is very close to Fair (Nash), accept
-            if val_o >= nash['m'] * 0.95: return None
-            # Safety valve: if very late and offer is reasonable (>60%), take it
-            if turns_left <= 4 and val_o >= self.total_val * 0.6: return None
-
-        # --- Counter-Offer Logic ---
-        self.my_turn_idx += 1
-        
-        # Player 0 Last Turn: Send Ultimatum
-        # Maximize my gain such that Opponent > 0 (Rational)
-        if turns_left == 2:
-            cands = [p for p in frontier if p['o'] > 0]
-            if not cands: cands = frontier
-            return max(cands, key=lambda x: x['m'])['c']
-
-        # Normal Turn: Proposal Logic
-        # Update target for proposal (similar to acceptance)
-        progress = (curr_global_turn + 1) / (self.max_rounds * 2)
-        if progress < 0.8:
-            f = 1.0 - (progress * 0.3)
+        # --- DYNAMIC ASPIRATION LEVEL ---
+        # Calculate target value based on remaining time.
+        # Curve: Starts at 100%, stays high, drops linearly to 70%, then fast to 50%
+        progress = my_turn_global / total_turns
+        if progress < 0.2:
+            f = 1.0
+        elif progress < 0.8:
+            # Linear drop from 1.0 to 0.7
+            f = 1.0 - 0.5 * (progress - 0.2)
         else:
-            f = 0.76 - ((progress - 0.8) / 0.2) * 0.21
-        target = max(self.total_val * 0.55, self.total_val * f)
+            # End game drop from 0.7 to 0.5 (Nash/Fair point)
+            f = 0.7 - 2.0 * (progress - 0.8)
+        
+        target = self.total_val * f
 
-        # Select candidates satisfying target
-        cands = [p for p in frontier if p['m'] >= target]
-        if not cands:
-            # If target too high, fall back to maximizing my value
-            cands = [max(frontier, key=lambda x: x['m'])]
+        # --- ACCEPTANCE LOGIC ---
+        if o:
+            # Core condition: Does offer meet target?
+            if val_o >= target: return None
+            
+            # Late game safety: Accept "Fair" offers to avoid total loss
+            if turns_left <= 4 and val_o >= self.total_val * 0.65: return None
+            if turns_left <= 2 and val_o >= self.total_val * 0.50: return None
+
+        # --- GENERATE COUNTER-OFFER ---
+        opp_vals = self.get_opp_est_values()
+        cands = self.generate_proposals(opp_vals)
         
-        # Strategy: Pick the candidate that maximizes Opponent's utility
-        # This increases the probability of them accepting.
-        best_offer = max(cands, key=lambda x: x['o'])
+        # --- ULTIMATUM PROPOSAL (MY LAST TURN) ---
+        # If this is my last chance to make an offer (Opponent has 1 turn to respond),
+        # I should offer the bundle that maximizes my value while giving Opponent > 0.
+        if turns_left == 2:
+            valid = [p for p in cands if p['vo'] > 1e-4]
+            # Safety checks
+            if not valid: valid = cands
+            best = max(valid, key=lambda x: x['vm'])
+            self.turn_idx += 1
+            return best['get']
+
+        # --- NORMAL PROPOSAL STRATEGY ---
+        # 1. Filter proposals that give me at least my target value
+        valid = [p for p in cands if p['vm'] >= target]
         
-        return best_offer['c']
+        if not valid:
+            # If target is too high, relax constraint to at least 50% or Maximize Me
+            valid = [p for p in cands if p['vm'] >= self.total_val * 0.55]
+            if not valid:
+                valid = [max(cands, key=lambda x: x['vm'])]
+
+        # 2. Selection Strategy: "Sweeten the Deal"
+        # Among proposals that satisfy my greed, pick the one that maximizes 
+        # the Opponent's estimated utility. This increases probability of acceptance.
+        best = max(valid, key=lambda x: x['vo'])
+        
+        self.turn_idx += 1
+        return best['get']

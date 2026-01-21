@@ -1,5 +1,3 @@
-import itertools
-
 class Agent:
     def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
         self.me = me
@@ -8,173 +6,110 @@ class Agent:
         self.max_rounds = max_rounds
         self.total_value = sum(c * v for c, v in zip(counts, values))
         self.n = len(counts)
-        self.opp_kept_sum = [0] * self.n
-        self.opp_offers_count = 0
-        self.turn_idx = 0
-        
-        # Calculate state space size to determine strategy
-        self.prob_size = 1
-        for c in counts:
-            self.prob_size *= (c + 1)
-        
-        # Threshold for brute force (250k is safe for 5s timeout)
-        self.is_brute_force = self.prob_size <= 250000
-        self.sorted_states = []
-        
-        if self.is_brute_force:
-            ranges = [range(c + 1) for c in counts]
-            all_states = []
-            # Generate all possible partitions (s represents what I GET)
-            for s in itertools.product(*ranges):
-                v = sum(s[i] * values[i] for i in range(self.n))
-                all_states.append((v, s))
-            # Sort states by My Value descending for efficient searching
-            all_states.sort(key=lambda x: x[0], reverse=True)
-            self.sorted_states = all_states
-
-    def get_opp_vals(self):
-        # Estimate opponent valuations based on what they keep in previous offers.
-        # Logic: If Opponent keeps item i often, they likely value it highly.
-        weights = []
-        for i in range(self.n):
-            kept = self.opp_kept_sum[i]
-            # Laplace smoothing: start with 1.0 to avoid division by zero
-            weights.append(kept + 1.0)
-            
-        # Normalize weights assuming their Total Value matches mine (symmetric assumption)
-        w_total = sum(self.counts[i] * weights[i] for i in range(self.n))
-        if w_total < 1e-9:
-            return [1.0] * self.n
-            
-        scale = self.total_value / w_total
-        return [w * scale for w in weights]
+        # History of what the opponent KEPT (counts - offered)
+        self.opp_history = [] 
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        # Calculate global turn index: 0, 1, ..., 2*max_rounds - 1
-        turn = self.turn_idx * 2 + self.me
-        turns_remaining = (self.max_rounds * 2) - turn
-        
-        # 1. Update Opponent Model
+        # 1. Update History & Identify Turn
         if o is not None:
-            self.opp_offers_count += 1
-            for i in range(self.n):
-                # Opponent kept = Total_Available - Offered_to_Me
-                self.opp_kept_sum[i] += (self.counts[i] - o[i])
-
+            # If they offered 'o', they kept 'counts - o'
+            kept = [self.counts[i] - o[i] for i in range(self.n)]
+            self.opp_history.append(kept)
+        
+        # Calculate global turn index (0-based)
+        # Agent 0 acts on turns 0, 2, 4... | Agent 1 acts on 1, 3, 5...
+        if self.me == 0:
+            turn = len(self.opp_history) * 2
+        else:
+            turn = len(self.opp_history) * 2 - 1
+            
+        total_turns = self.max_rounds * 2
+        remaining = total_turns - turn
+        
         # 2. Acceptance Logic
         if o is not None:
-            my_val_o = sum(o[i] * self.values[i] for i in range(self.n))
+            my_o_val = sum(o[i] * self.values[i] for i in range(self.n))
             
-            # Panic Condition: If I am the last mover (Agent 1) in the very last turn,
-            # any non-zero value is better than the "No Deal" (0) result.
-            if turns_remaining <= 1:
-                if my_val_o > 0:
+            # Endgame: Agent 1 (Last Mover) must accept any positive outcome at last turn
+            if remaining <= 1:
+                if my_o_val > 0:
                     return None
             
-            # Strategic Acceptance based on time (Boulware tactic)
-            progress = turn / (self.max_rounds * 2)
+            # Reservation Value Curve (Time-Dependent)
+            progress = turn / total_turns
             
-            if progress < 0.2:
-                req = 0.98
-            elif progress < 0.6:
-                req = 0.80
-            elif progress < 0.90:
-                req = 0.70
-            elif progress < 0.98:
-                req = 0.60
-            else:
-                req = 0.50
-                
-            # Accept if offer meets requirement
-            if my_val_o >= (self.total_value * req):
-                return None
+            # Thresholds: start demanding, concede later
+            if progress < 0.2: min_frac = 0.98
+            elif progress < 0.5: min_frac = 0.85
+            elif progress < 0.8: min_frac = 0.75
+            elif progress < 0.95: min_frac = 0.60
+            else: min_frac = 0.45 
             
-            # Safety Net: If deal is "Good Enough" (e.g. 75%) past mid-game, take it
-            # to avoid risky end-games against stubborn opponents.
-            if progress > 0.4 and my_val_o >= self.total_value * 0.75:
-                return None
-            if progress > 0.8 and my_val_o >= self.total_value * 0.65:
+            if my_o_val >= int(self.total_value * min_frac):
                 return None
 
-        # 3. Counter-Offer Generation
-        self.turn_idx += 1 # Prepare index for next call
+        # 3. Opponent Modeling
+        # Estimate Opponent Weights based on what they keep.
+        # Heuristic: Value ~ 1 + (Frequency_Kept)^2
+        opp_weights = [1.0] * self.n
+        if self.opp_history:
+            n_obs = len(self.opp_history)
+            kept_sums = [0] * self.n
+            for h in self.opp_history:
+                for i in range(self.n):
+                    kept_sums[i] += h[i]
+            
+            for i in range(self.n):
+                if self.counts[i] > 0:
+                    # Normalized frequency they kept this item (0.0 to 1.0)
+                    freq = kept_sums[i] / (n_obs * self.counts[i])
+                    # Higher power increases sensitivity to their preferences
+                    opp_weights[i] = 1.0 + 5.0 * (freq ** 2)
+
+        # 4. Counter-Offer Generation
+        # Determine Target Value for Me
+        progress_next = (turn + 1) / total_turns
         
-        opp_vals = self.get_opp_vals()
-        progress = turn / (self.max_rounds * 2)
+        if progress_next < 0.2: target_frac = 1.0
+        elif progress_next < 0.4: target_frac = 0.95
+        elif progress_next < 0.7: target_frac = 0.85
+        elif progress_next < 0.9: target_frac = 0.75
+        elif progress_next < 0.98: target_frac = 0.60
+        else: target_frac = 0.50
         
-        # Determine Value Target for the counter-offer
-        if progress < 0.1:
-            target_frac = 1.0
-        elif progress < 0.8:
-            # Linear drop 1.0 -> 0.75
-            target_frac = 1.0 - (0.25 * (progress / 0.8))
-        else:
-            # End game drop 0.75 -> 0.50
-            target_frac = 0.75 - (0.25 * (progress - 0.8) / 0.2)
+        # Endgame: Agent 0 (Second to Last Mover) MUST offer something tempting
+        if self.me == 0 and remaining <= 2:
+            target_frac = min(target_frac, 0.55)
             
         target_v = self.total_value * target_frac
         
-        # Ultimatum Logic: If I am Agent 0 and this is my last turn (turns_left=2),
-        # I must offer a deal the opponent will likely accept, or risk 0.
-        is_ultimatum = (turns_remaining == 2)
-        if is_ultimatum:
-            min_opp_val = self.total_value * 0.20 # Guarantee them ~20%
-        
-        if self.is_brute_force:
-            best_offer = None
-            best_opp_val = -1.0
-            valid_found = False
-            
-            # Use pre-sorted states (High MyVal -> Low MyVal)
-            for mv, s in self.sorted_states:
-                # Stop if we drop below target (unless we haven't found any valid cand)
-                if mv < target_v:
-                    if valid_found:
-                        break
-                    # If the maximum possible value is less than target, take max possible.
-                    return list(self.sorted_states[0][1])
-
-                valid_found = True
-                
-                # Calculate estimated Opponent Utility for this split
-                ov = sum((self.counts[i] - s[i]) * opp_vals[i] for i in range(self.n))
-                
-                if is_ultimatum:
-                    # Satisficing: Pick the first state (highest MyVal) where OppVal is decent
-                    if ov >= min_opp_val:
-                        return list(s)
-                else:
-                    # Maximizing: Find state with Max OppVal among those satisfying MyVal constraint
-                    if ov > best_opp_val:
-                        best_opp_val = ov
-                        best_offer = list(s)
-            
-            if best_offer:
-                return best_offer
+        # 5. Greedy Efficiency Heuristic (Knapsack Variant)
+        # We want to KEEP items with high Ratio = MyValue / EstOppWeight
+        # This finds Pareto-efficient splits relative to the estimated model.
+        items = []
+        for i in range(self.n):
+            if self.values[i] == 0:
+                # If value is 0 for me, ratio is 0. 
+                # Lowest priority to keep -> First to give away.
+                r = 0.0
             else:
-                return list(self.sorted_states[0][1]) # Fallback
+                r = self.values[i] / opp_weights[i]
+            
+            # Treat items individually
+            for _ in range(self.counts[i]):
+                items.append({'i': i, 'v': self.values[i], 'r': r})
+        
+        # Sort Descending: High Ratio (Keep) -> Low Ratio (Give)
+        items.sort(key=lambda x: x['r'], reverse=True)
+        
+        proposal = [0] * self.n
+        current_v = 0
+        
+        for item in items:
+            # Accumulate items until target value is met
+            # Ignore 0-value items (they stay at end of list and are not added)
+            if item['v'] > 0 and current_v < target_v:
+                proposal[item['i']] += 1
+                current_v += item['v']
                 
-        else:
-            # Greedy Heuristic for large state spaces
-            # Break items into units and sort by efficiency: MyValue / OppValue
-            units = []
-            for i in range(self.n):
-                ov = opp_vals[i] if opp_vals[i] > 1e-6 else 1e-6
-                r = self.values[i] / ov
-                for _ in range(self.counts[i]):
-                    units.append( {'i': i, 'v': self.values[i], 'r': r} )
-            
-            # Sort units by Efficiency Descending
-            units.sort(key=lambda x: x['r'], reverse=True)
-            
-            proposal = [0] * self.n
-            curr_val = 0
-            
-            # Accumulate units until target is met
-            for u in units:
-                if curr_val >= target_v:
-                    break
-                proposal[u['i']] += 1
-                curr_val += u['v']
-                
-            return proposal
+        return proposal

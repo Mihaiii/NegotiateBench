@@ -6,130 +6,136 @@ class Agent:
         self.counts = counts
         self.values = values
         self.max_rounds = max_rounds
-        self.step = 0
+        self.round_idx = 0  # Tracks the current round number (1-based)
+        
         self.total_value = sum(c * v for c, v in zip(counts, values))
         self.num_items = len(counts)
         
-        # Opponent modeling: Frequency of items kept by opponent
-        # self.opp_kept_sum[i] increments each time opponent keeps item i
-        self.opp_kept_sum = [0] * self.num_items
+        # Opponent modeling: Frequency of items opponent keeps in their offers.
+        # Initiated with a small epsilon to valid division by zero.
+        self.opp_kept_freq = [0.01] * self.num_items 
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        self.step += 1
-        is_last_round = (self.step == self.max_rounds)
-        
-        # --- Update Opponent Model & Calculate Offer Value ---
+        # --- Update Round Counter ---
+        if self.me == 0:
+            # Player 1 moves at Turns 1, 3, 5... (Start of rounds)
+            if o is None:
+                self.round_idx = 1
+            else:
+                self.round_idx += 1
+        else:
+            # Player 2 moves at Turns 2, 4, 6... (End of rounds)
+            # The first call is response to P1's first offer (Round 1)
+            self.round_idx += 1
+
+        # --- Update Opponent Model ---
         offer_val = 0
         if o is not None:
-            # They offer 'o' to me, meaning they kept 'counts - o'
-            kept = [self.counts[i] - o[i] for i in range(self.num_items)]
-            for i in range(self.num_items):
-                self.opp_kept_sum[i] += kept[i]
-            
             offer_val = sum(o[i] * self.values[i] for i in range(self.num_items))
-        
-        # --- Decision Logic ---
-        
-        # 1. Player 1: End-Game Panic
-        # If I am the second mover, the game ends immediately after my decision on the last round.
-        # If I reject, we both get 0. Rational choice is to accept anything > 0.
-        if self.me == 1 and is_last_round:
-            if o is not None and offer_val > 0:
+            # If they offer 'o' to me, it means they want to keep 'counts - o'
+            for i in range(self.num_items):
+                kept = self.counts[i] - o[i]
+                if kept > 0:
+                    self.opp_kept_freq[i] += kept
+
+        # --- P2 Last Round Strategy (Rational Acceptance) ---
+        # If I am Player 2 and this is the last turn of the entire game,
+        # rejecting results in 0 for both. Rationality dictates accepting anything > 0.
+        if self.me == 1 and self.round_idx == self.max_rounds:
+            if o is not None:
+                # Accept if we get any value (or even 0, to seal the deal, 
+                # though usually > 0 is preferred, safeguarding against total loss).
+                # To be strictly maximizing in a one-shot game:
                 return None
+
+        # --- Determine Target Value (Boulware Strategy) ---
+        # t ranges from 0.0 (start) to 1.0 (end)
+        t = (self.round_idx - 1) / max(1, self.max_rounds - 1)
         
-        # 2. Determine Target Value (Boulware Strategy)
-        # Stay high for most of the negotiation, concede near the end.
-        
-        # t goes from 0.0 (first step) to 1.0 (last step)
-        t = (self.step - 1) / (self.max_rounds - 1) if self.max_rounds > 1 else 1.0
-        
+        # Concession curve parameters
+        # Beta > 1 means we concede slowly (tough negotiator)
+        beta = 4.0 
         start_frac = 1.0
-        end_frac = 0.7  # Aspiration floor
+        end_frac = 0.6  # Final aspiration floor (60% of total)
         
-        # Curve: t**4 keeps the target near 100% for longer
-        current_frac = start_frac + (end_frac - start_frac) * (t ** 4)
-        target_val = int(current_frac * self.total_value)
+        target_frac = start_frac + (end_frac - start_frac) * (t ** beta)
+        target_val = int(target_frac * self.total_value)
         
-        # 3. Standard Acceptance
-        if o is not None and offer_val >= target_val:
-            return None
-            
-        # --- Offer Generation ---
-        
-        # 4. Player 0: End-Game Ultimatum
-        # If I am first mover, my last offer is the final proposal.
-        # Opponent (if rational) will accept anything > 0.
-        # Strategy: Offer a proposal that gives me nearly everything, 
-        # but leaves 1 unit of the item the opponent desires most.
-        if self.me == 0 and is_last_round:
+        # --- Check Acceptance ---
+        if o is not None:
+            # Always accept if we get everything (max possible)
+            if offer_val == self.total_value:
+                return None
+            # Accept if offer meets our current decayed target
+            if offer_val >= target_val:
+                return None
+
+        # --- P1 Last Round Strategy (Ultimatum) ---
+        # If I am Player 1 and this is the last round, my offer is final.
+        # If P2 rejects, we get 0. I should offer the "Minimum Acceptable Deal".
+        if self.me == 0 and self.round_idx == self.max_rounds:
             return self._generate_ultimatum()
-            
-        # 5. Smart Counter-Offer
+
+        # --- Generate Counter-Offer ---
         return self._generate_smart_offer(target_val)
-        
+
     def _generate_ultimatum(self) -> list[int]:
-        # Identify opponent's highest interest item
-        best_opp_idx = -1
-        max_interest = -1
-        
-        # Shuffle indices to randomize tie-breaking
+        # Identify the item the opponent seems to desire most (highest keep frequency)
         indices = list(range(self.num_items))
-        random.shuffle(indices)
+        random.shuffle(indices) # Randomize ties
+        best_idx = max(indices, key=lambda i: self.opp_kept_freq[i])
         
-        for i in indices:
-            if self.opp_kept_sum[i] > max_interest:
-                max_interest = self.opp_kept_sum[i]
-                best_opp_idx = i
-        
-        # I take everything...
+        # Proposal: I take everything...
         proposal = list(self.counts)
         
         # ...except 1 unit of their favorite item
-        if best_opp_idx != -1 and proposal[best_opp_idx] > 0:
-            proposal[best_opp_idx] -= 1
-            
+        if proposal[best_idx] > 0:
+            proposal[best_idx] -= 1
+        else:
+            # Fallback: leave 1 of anything available
+            for i in range(self.num_items):
+                if proposal[i] > 0:
+                    proposal[i] -= 1
+                    break
         return proposal
 
     def _generate_smart_offer(self, target: int) -> list[int]:
-        # Sort by limit efficiency: MyValue / OpponentInterest
-        item_scores = []
+        # Goal: Build a bundle for ME that sums to >= target.
+        # Heuristic: Prioritize items where MyValue / OpponentInterest is high.
+        # This gives me what I want and the opponent what they want (efficiency).
+        
+        candidates = []
         for i in range(self.num_items):
-            my_v = self.values[i]
-            opp_int = self.opp_kept_sum[i]
+            val = self.values[i]
+            if val == 0:
+                continue # Don't demand items worthless to me
             
-            if my_v > 0:
-                # Score = My Utility / (Their Estimated Utility + small)
-                noise = 1.0 + random.random() * 0.05
-                score = (my_v / (opp_int + 1.0)) * noise
-            else:
-                score = 0
+            opp_interest = self.opp_kept_freq[i]
+            # Add slight noise to prevent deterministic loops
+            noise = random.uniform(0.98, 1.02)
+            metric = (val / (opp_interest + 0.1)) * noise
+            candidates.append((metric, i))
             
-            item_scores.append((score, i))
-            
-        # Sort descending by score
-        item_scores.sort(key=lambda x: x[0], reverse=True)
+        # Sort by efficiency descending
+        candidates.sort(key=lambda x: x[0], reverse=True)
         
         proposal = [0] * self.num_items
         current_val = 0
         
-        # Fill proposal to meet target
-        for score, idx in item_scores:
+        # Greedy Knapsack Fill
+        for _, idx in candidates:
             if current_val >= target:
                 break
                 
             available = self.counts[idx]
+            val = self.values[idx]
             
-            # Decide how many to take
-            # We take just enough to reach target to maximize slack for opponent
-            take = 0
-            val_per_item = self.values[idx]
+            # Calculate how many needed to reach target
+            needed_val = target - current_val
+            needed_count = (needed_val + val - 1) // val
             
-            if val_per_item > 0:
-                needed_val = target - current_val
-                needed_count = (needed_val + val_per_item - 1) // val_per_item
-                take = min(available, needed_count)
-            
+            take = min(available, needed_count)
             proposal[idx] += take
-            current_val += take * val_per_item
+            current_val += take * val
             
         return proposal

@@ -6,88 +6,130 @@ class Agent:
         self.counts = counts
         self.values = values
         self.max_rounds = max_rounds
-        self.turns_played = 0
+        self.step = 0
         self.total_value = sum(c * v for c, v in zip(counts, values))
+        self.num_items = len(counts)
         
-        # Flatten the inventory into individual items (value, index)
-        # This simplifies the logic to a greedy selection of individual units
-        self.all_items = []
-        for idx, count in enumerate(counts):
-            for _ in range(count):
-                self.all_items.append((values[idx], idx))
-        
-        # Sort items by value descending to prioritize high-value items
-        # Shuffle first to introduce randomness in tie-breaking, 
-        # avoiding deterministic loops in negotiation
-        random.shuffle(self.all_items)
-        self.all_items.sort(key=lambda x: x[0], reverse=True)
+        # Opponent modeling: Frequency of items kept by opponent
+        # self.opp_kept_sum[i] increments each time opponent keeps item i
+        self.opp_kept_sum = [0] * self.num_items
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        self.turns_played += 1
-        remaining_turns = self.max_rounds - self.turns_played
+        self.step += 1
+        is_last_round = (self.step == self.max_rounds)
         
-        # Calculate the value of the offer provided by the opponent
+        # --- Update Opponent Model & Calculate Offer Value ---
         offer_val = 0
         if o is not None:
-            offer_val = sum(o[i] * self.values[i] for i in range(len(o)))
+            # They offer 'o' to me, meaning they kept 'counts - o'
+            kept = [self.counts[i] - o[i] for i in range(self.num_items)]
+            for i in range(self.num_items):
+                self.opp_kept_sum[i] += kept[i]
             
-        # Calculate negotiation progress (0.0 to ~1.0)
-        # Used to decay the aspiration level
-        t = (self.turns_played - 1) / self.max_rounds if self.max_rounds > 0 else 1.0
-        
-        # Strategy Parameters
-        # start_frac: Initial target (percentage of total value)
-        # end_frac: Target at the final round
-        start_frac = 1.0
-        
-        # If I am Player 0 (First Mover), my last turn is the second-to-last in the game.
-        # The opponent has the final say (Accept/Reject/Counter=Reject).
-        # Thus, on my last turn, I must offer a deal they are very likely to accept (Fair split).
-        if self.me == 0 and remaining_turns == 0:
-            end_frac = 0.5
-        else:
-            # If I am Player 1 (Second Mover), I have the final say on the very last turn.
-            # I can afford to be tougher, but should ensure I don't get 0.
-            end_frac = 0.6
-
-        # Determine target using a convex curve (holds high value longer, then drops)
-        current_frac = start_frac - (start_frac - end_frac) * (t ** 2)
-        target_val = int(self.total_value * current_frac)
+            offer_val = sum(o[i] * self.values[i] for i in range(self.num_items))
         
         # --- Decision Logic ---
         
-        if o is not None:
-            # 1. Panic Acceptance (Player 1, Last Turn)
-            # If I reject/counter now, the game ends with no deal. 
-            # Accepting anything > 0 is rational compared to getting 0.
-            if self.me == 1 and remaining_turns == 0:
-                if offer_val > 0:
-                    return None
-            
-            # 2. Standard Acceptance
-            if offer_val >= target_val:
+        # 1. Player 1: End-Game Panic
+        # If I am the second mover, the game ends immediately after my decision on the last round.
+        # If I reject, we both get 0. Rational choice is to accept anything > 0.
+        if self.me == 1 and is_last_round:
+            if o is not None and offer_val > 0:
                 return None
-                
-        # --- Generate Counter-Offer ---
         
-        # We construct an offer that gives us >= target_val.
-        # We use a greedy approach: take items we value most.
-        # Ideally, this leaves items we value less (but opponent might value more) to them.
+        # 2. Determine Target Value (Boulware Strategy)
+        # Stay high for most of the negotiation, concede near the end.
         
-        my_proposal = [0] * len(self.counts)
-        current_sum = 0
+        # t goes from 0.0 (first step) to 1.0 (last step)
+        t = (self.step - 1) / (self.max_rounds - 1) if self.max_rounds > 1 else 1.0
         
-        # Ensure we ask for at least something if total value exists
-        ask_target = max(1, target_val) if self.total_value > 0 else 0
+        start_frac = 1.0
+        end_frac = 0.7  # Aspiration floor
         
-        for val, idx in self.all_items:
-            # Stop if we have reached our target value
-            if current_sum >= ask_target:
-                break
+        # Curve: t**4 keeps the target near 100% for longer
+        current_frac = start_frac + (end_frac - start_frac) * (t ** 4)
+        target_val = int(current_frac * self.total_value)
+        
+        # 3. Standard Acceptance
+        if o is not None and offer_val >= target_val:
+            return None
             
-            # Add item to our proposal if available
-            if my_proposal[idx] < self.counts[idx]:
-                my_proposal[idx] += 1
-                current_sum += val
+        # --- Offer Generation ---
+        
+        # 4. Player 0: End-Game Ultimatum
+        # If I am first mover, my last offer is the final proposal.
+        # Opponent (if rational) will accept anything > 0.
+        # Strategy: Offer a proposal that gives me nearly everything, 
+        # but leaves 1 unit of the item the opponent desires most.
+        if self.me == 0 and is_last_round:
+            return self._generate_ultimatum()
+            
+        # 5. Smart Counter-Offer
+        return self._generate_smart_offer(target_val)
+        
+    def _generate_ultimatum(self) -> list[int]:
+        # Identify opponent's highest interest item
+        best_opp_idx = -1
+        max_interest = -1
+        
+        # Shuffle indices to randomize tie-breaking
+        indices = list(range(self.num_items))
+        random.shuffle(indices)
+        
+        for i in indices:
+            if self.opp_kept_sum[i] > max_interest:
+                max_interest = self.opp_kept_sum[i]
+                best_opp_idx = i
+        
+        # I take everything...
+        proposal = list(self.counts)
+        
+        # ...except 1 unit of their favorite item
+        if best_opp_idx != -1 and proposal[best_opp_idx] > 0:
+            proposal[best_opp_idx] -= 1
+            
+        return proposal
+
+    def _generate_smart_offer(self, target: int) -> list[int]:
+        # Sort by limit efficiency: MyValue / OpponentInterest
+        item_scores = []
+        for i in range(self.num_items):
+            my_v = self.values[i]
+            opp_int = self.opp_kept_sum[i]
+            
+            if my_v > 0:
+                # Score = My Utility / (Their Estimated Utility + small)
+                noise = 1.0 + random.random() * 0.05
+                score = (my_v / (opp_int + 1.0)) * noise
+            else:
+                score = 0
+            
+            item_scores.append((score, i))
+            
+        # Sort descending by score
+        item_scores.sort(key=lambda x: x[0], reverse=True)
+        
+        proposal = [0] * self.num_items
+        current_val = 0
+        
+        # Fill proposal to meet target
+        for score, idx in item_scores:
+            if current_val >= target:
+                break
                 
-        return my_proposal
+            available = self.counts[idx]
+            
+            # Decide how many to take
+            # We take just enough to reach target to maximize slack for opponent
+            take = 0
+            val_per_item = self.values[idx]
+            
+            if val_per_item > 0:
+                needed_val = target - current_val
+                needed_count = (needed_val + val_per_item - 1) // val_per_item
+                take = min(available, needed_count)
+            
+            proposal[idx] += take
+            current_val += take * val_per_item
+            
+        return proposal

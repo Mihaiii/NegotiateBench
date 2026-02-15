@@ -159,9 +159,11 @@ def main():
     top_model_name = get_top_model_latest_session()
 
     # Iterate through models and call LLM API
-    for model in models.copy():
+    models_to_skip = []
+    for model in models:
         # do not ask to regenerate code for the top model from the latest session
         if model["display_name"] == top_model_name or model.get("is_human", False):
+            models_to_skip.append(model)
             continue
 
         display_name = model["display_name"]
@@ -177,7 +179,7 @@ def main():
         
         if not model_name:
             print(f"Skipping {display_name}: no model name found")
-            models.remove(model)
+            models_to_skip.append(model)
             continue
 
         print(f"\nProcessing model: {display_name} (provider: {provider})")
@@ -195,8 +197,11 @@ def main():
 
         new_code = get_algos(display_name, model_name, provider, current_code, model_samples, loaderboard_data)
         if not new_code:
-            models.remove(model)
+            models_to_skip.append(model)
             continue
+    
+    # Remove models that should be skipped
+    models = [m for m in models if m not in models_to_skip]
 
     # Check if we have any models left to battle
     if len(models) < 2:

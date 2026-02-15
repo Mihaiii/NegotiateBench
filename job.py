@@ -18,11 +18,25 @@ from db.service import save_battle_results, save_battle_samples, get_samples, ge
 # Load environment variables from .env file
 load_dotenv()
 
-# Initialize OpenRouter client
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-)
+# Initialize provider clients
+openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
+aihubmix_api_key = os.getenv("AIHUBMIX_API_KEY")
+
+# Only initialize clients if API keys are available
+openrouter_client = None
+aihubmix_client = None
+
+if openrouter_api_key:
+    openrouter_client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=openrouter_api_key,
+    )
+
+if aihubmix_api_key:
+    aihubmix_client = OpenAI(
+        base_url="https://aihubmix.com/v1",
+        api_key=aihubmix_api_key,
+    )
 
 
 def build_user_prompt(
@@ -77,10 +91,20 @@ def build_user_prompt(
     )
 
 
-def call_openrouter(model_name: str, system_prompt: str, user_prompt: str) -> str:
-    """Call OpenRouter API and return the response text."""
+def call_llm_api(model_name: str, system_prompt: str, user_prompt: str, provider: str = "openrouter") -> str:
+    """Call LLM API based on provider and return the response text."""
     max_retries = 3
     last_error = None
+    
+    # Select the appropriate client based on provider
+    if provider == "aihubmix":
+        client = aihubmix_client
+        if client is None:
+            raise ValueError("AIHUBMIX_API_KEY is not set in environment variables")
+    else:  # default to openrouter
+        client = openrouter_client
+        if client is None:
+            raise ValueError("OPENROUTER_API_KEY is not set in environment variables")
 
     for attempt in range(max_retries):
         try:
@@ -95,7 +119,7 @@ def call_openrouter(model_name: str, system_prompt: str, user_prompt: str) -> st
         except Exception as e:
             last_error = e
             print(
-                f"OpenRouter API call failed (attempt {attempt + 1}/{max_retries}): {e}"
+                f"{provider.upper()} API call failed (attempt {attempt + 1}/{max_retries}): {e}"
             )
 
     raise last_error
@@ -134,17 +158,29 @@ def main():
     # Identify top model
     top_model_name = get_top_model_latest_session()
 
-    # Iterate through models and call OpenRouter
+    # Iterate through models and call LLM API
     for model in models.copy():
         # do not ask to regenerate code for the top model from the latest session
         if model["display_name"] == top_model_name or model.get("is_human", False):
             continue
 
         display_name = model["display_name"]
+        
+        # Get provider (defaults to openrouter if not specified)
+        provider = model.get("provider", "openrouter")
+        
+        # Get model name based on provider
+        if provider == "openrouter":
+            model_name = model.get("openrouter_name")
+        else:
+            model_name = model.get("model_name")
+        
+        if not model_name:
+            print(f"Skipping {display_name}: no model name found")
+            models.remove(model)
+            continue
 
-        openrouter_name = model["openrouter_name"]
-
-        print(f"\nProcessing model: {display_name}")
+        print(f"\nProcessing model: {display_name} (provider: {provider})")
 
         # Get existing code if any
         current_code = get_current_code(display_name)
@@ -157,7 +193,7 @@ def main():
             or s.get("opponent_model_name") == display_name
         ]
 
-        new_code = get_algos(display_name, openrouter_name, current_code, model_samples, loaderboard_data)
+        new_code = get_algos(display_name, model_name, provider, current_code, model_samples, loaderboard_data)
         if not new_code:
             models.remove(model)
             continue
@@ -226,7 +262,7 @@ def main():
     save_battle_results(battle_results, max_possible_profit, new_commit_hash)
 
 
-def get_algos(display_name, openrouter_name, current_code, samples, loaderboard_data):
+def get_algos(display_name, model_name, provider, current_code, samples, loaderboard_data):
 
     prompts = load_prompts()
     system_prompt_template = prompts.get("system_prompt", "")
@@ -250,8 +286,14 @@ def get_algos(display_name, openrouter_name, current_code, samples, loaderboard_
         print("-" * 20)
         print(f"{display_name}: {user_prompt=}")
         print("=" * 20)
-        # Call OpenRouter
-        response_text = call_openrouter(openrouter_name, system_prompt, user_prompt)
+        
+        # Call LLM API with error handling to skip unreachable models
+        try:
+            response_text = call_llm_api(model_name, system_prompt, user_prompt, provider)
+        except Exception as e:
+            print(f"Failed to call {provider} API for {display_name}: {e}")
+            print(f"Skipping {display_name} due to API error")
+            return None
 
         # Extract Python code from response
         extracted_code = extract_python_code(response_text)

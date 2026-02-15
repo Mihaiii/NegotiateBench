@@ -14,20 +14,19 @@ class TestHumanModelsInBattles:
             {"display_name": "AI Model 2", "model_name": "ai/model-2"},
         ]
         
-        # Simulate the code generation loop logic
-        models_to_skip = []
-        
-        for model in test_models:
+        # Simulate the code generation loop logic using models.copy()
+        models = test_models.copy()
+        for model in models.copy():
             if model.get("is_human", False):
-                models_to_skip.append(model)
+                # Human model is skipped (continue) but NOT removed from models list
                 continue
         
-        # Verify human model was added to skip list
-        assert len(models_to_skip) == 1
-        assert models_to_skip[0]["display_name"] == "Human Model"
+        # Verify human model is still in the models list for battles
+        assert len(models) == 3
+        assert any(m["display_name"] == "Human Model" for m in models)
 
     def test_human_models_should_participate_in_battles(self):
-        """Test that human models should NOT be filtered out before battles."""
+        """Test that human models should NOT be removed from models list before battles."""
         # Mock models with one human model
         test_models = [
             {"display_name": "AI Model 1", "model_name": "ai/model-1"},
@@ -35,22 +34,15 @@ class TestHumanModelsInBattles:
             {"display_name": "AI Model 2", "model_name": "ai/model-2"},
         ]
         
-        models_to_skip = [
-            {"display_name": "Human Model", "model_name": None, "is_human": True}
-        ]
-        
-        # This is the OLD behavior (incorrect) - filtering out models_to_skip
-        models_after_old_filter = [m for m in test_models if m not in models_to_skip]
-        
-        # This should be the NEW behavior (correct) - NOT filtering
-        models_after_new_filter = test_models
-        
-        # Demonstrate the old behavior was wrong
-        assert len(models_after_old_filter) == 2, "Old behavior incorrectly filters out human models"
+        # Simulate the loop - human models use continue, not remove
+        models = test_models.copy()
+        for model in models.copy():
+            if model.get("is_human", False):
+                continue  # Skip code generation, but stay in list
         
         # After the fix, all models should remain for battles
-        assert len(models_after_new_filter) == 3
-        assert any(m["display_name"] == "Human Model" for m in models_after_new_filter)
+        assert len(models) == 3
+        assert any(m["display_name"] == "Human Model" for m in models)
 
     def test_top_model_skipped_from_code_generation(self):
         """Test that the top model from latest session is skipped from code generation."""
@@ -61,75 +53,59 @@ class TestHumanModelsInBattles:
         ]
         
         top_model_name = "Top Model"
-        models_to_skip = []
         
-        for model in test_models:
+        # Simulate the code generation loop
+        models = test_models.copy()
+        for model in models.copy():
             if model["display_name"] == top_model_name:
-                models_to_skip.append(model)
-                continue
+                continue  # Skip code generation, but stay in list
         
-        # Verify top model was added to skip list
-        assert len(models_to_skip) == 1
-        assert models_to_skip[0]["display_name"] == "Top Model"
+        # Verify top model is still in the models list
+        assert len(models) == 3
+        assert any(m["display_name"] == "Top Model" for m in models)
 
     def test_top_model_should_participate_in_battles(self):
-        """Test that the top model should NOT be filtered out before battles."""
+        """Test that the top model should NOT be removed from models list before battles."""
         test_models = [
             {"display_name": "Top Model", "model_name": "top/model"},
             {"display_name": "AI Model 1", "model_name": "ai/model-1"},
             {"display_name": "AI Model 2", "model_name": "ai/model-2"},
         ]
         
-        models_to_skip = [
-            {"display_name": "Top Model", "model_name": "top/model"}
-        ]
+        top_model_name = "Top Model"
         
-        # This is the OLD behavior (incorrect) - filtering out models_to_skip
-        models_after_old_filter = [m for m in test_models if m not in models_to_skip]
-        
-        # This should be the NEW behavior (correct) - NOT filtering
-        models_after_new_filter = test_models
-        
-        # Demonstrate the old behavior was wrong
-        assert len(models_after_old_filter) == 2, "Old behavior incorrectly filters out top model"
+        # Simulate the loop - top model uses continue, not remove
+        models = test_models.copy()
+        for model in models.copy():
+            if model["display_name"] == top_model_name:
+                continue  # Skip code generation, but stay in list
         
         # After the fix, all models should remain for battles
-        assert len(models_after_new_filter) == 3
-        assert any(m["display_name"] == "Top Model" for m in models_after_new_filter)
+        assert len(models) == 3
+        assert any(m["display_name"] == "Top Model" for m in models)
 
     def test_models_that_fail_code_generation_logic(self):
-        """Test the logic for handling models that fail code generation."""
+        """Test that models that fail code generation ARE removed from the models list."""
         test_models = [
             {"display_name": "AI Model 1", "model_name": "ai/model-1"},
             {"display_name": "Failed Model", "model_name": "failed/model"},
             {"display_name": "AI Model 2", "model_name": "ai/model-2"},
         ]
         
-        models_to_skip = []
-        
-        # Simulate: Model that produces no code should be added to skip list
+        # Simulate: Model that produces no code should be removed from models list
         # In the real code, this happens when get_algos returns None
-        failed_model = {"display_name": "Failed Model", "model_name": "failed/model"}
-        models_to_skip.append(failed_model)
+        models = test_models.copy()
+        for model in models.copy():
+            # Simulate a failed model
+            if model["display_name"] == "Failed Model":
+                models.remove(model)  # Remove failed model
+                continue
         
-        # With the old behavior, this model would be filtered out
-        models_for_battles_old = [m for m in test_models if m not in models_to_skip]
-        
-        # After the fix, models are NOT filtered based on models_to_skip
-        models_for_battles_new = test_models
-        
-        # Demonstrate the old behavior filtered out the failed model
-        assert len(models_for_battles_old) == 2
-        assert not any(m["display_name"] == "Failed Model" for m in models_for_battles_old)
-        
-        # After the fix, all models are passed to battles (including failed ones)
-        # The battle system (load_agent_class) will skip models without valid code
-        assert len(models_for_battles_new) == 3
-        assert any(m["display_name"] == "Failed Model" for m in models_for_battles_new)
-        
-        # Verify the skip list was populated correctly
-        assert len(models_to_skip) == 1
-        assert models_to_skip[0]["display_name"] == "Failed Model"
+        # Models that fail code generation should be removed
+        assert len(models) == 2
+        assert not any(m["display_name"] == "Failed Model" for m in models)
+        assert any(m["display_name"] == "AI Model 1" for m in models)
+        assert any(m["display_name"] == "AI Model 2" for m in models)
 
 
 if __name__ == "__main__":

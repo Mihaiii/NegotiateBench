@@ -159,11 +159,9 @@ def main():
     top_model_name = get_top_model_latest_session()
 
     # Iterate through models and call LLM API
-    models_to_skip = []
-    for model in models:
+    for model in models.copy():
         # do not ask to regenerate code for the top model from the latest session
         if model["display_name"] == top_model_name or model.get("is_human", False):
-            models_to_skip.append(model)
             continue
 
         display_name = model["display_name"]
@@ -176,7 +174,7 @@ def main():
         
         if not model_name:
             print(f"Skipping {display_name}: no model name found")
-            models_to_skip.append(model)
+            models.remove(model)
             continue
 
         print(f"\nProcessing model: {display_name} (provider: {provider})")
@@ -194,13 +192,8 @@ def main():
 
         new_code = get_algos(display_name, model_name, provider, current_code, model_samples, loaderboard_data)
         if not new_code:
-            models_to_skip.append(model)
+            models.remove(model)
             continue
-    
-    # Note: models_to_skip contains models that were skipped during code generation
-    # (human models, top model, models that failed). However, they should still
-    # participate in battles if they have existing solution files. The battle
-    # system will automatically skip models without valid agent code.
 
     # Check if we have any models left to battle
     if len(models) < 2:

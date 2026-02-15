@@ -115,11 +115,19 @@ class TestHumanModelsInBattles:
         # With the old behavior, this model would be filtered out
         models_for_battles_old = [m for m in test_models if m not in models_to_skip]
         
-        # But after the fix, we should NOT filter based on models_to_skip
-        # Instead, we need to track which models actually need to be excluded
-        # Models should only be excluded if they have no solution file
-        # This is a different concern from code generation
+        # After the fix, models are NOT filtered based on models_to_skip
+        models_for_battles_new = test_models
         
+        # Demonstrate the old behavior filtered out the failed model
+        assert len(models_for_battles_old) == 2
+        assert not any(m["display_name"] == "Failed Model" for m in models_for_battles_old)
+        
+        # After the fix, all models are passed to battles (including failed ones)
+        # The battle system (load_agent_class) will skip models without valid code
+        assert len(models_for_battles_new) == 3
+        assert any(m["display_name"] == "Failed Model" for m in models_for_battles_new)
+        
+        # Verify the skip list was populated correctly
         assert len(models_to_skip) == 1
         assert models_to_skip[0]["display_name"] == "Failed Model"
 

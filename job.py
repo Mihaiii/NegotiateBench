@@ -197,8 +197,10 @@ def main():
             models_to_skip.append(model)
             continue
     
-    # Remove models that should be skipped
-    models = [m for m in models if m not in models_to_skip]
+    # Note: models_to_skip contains models that were skipped during code generation
+    # (human models, top model, models that failed). However, they should still
+    # participate in battles if they have existing solution files. The battle
+    # system will automatically skip models without valid agent code.
 
     # Check if we have any models left to battle
     if len(models) < 2:

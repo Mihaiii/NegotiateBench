@@ -171,11 +171,8 @@ def main():
         # Get provider (defaults to openrouter if not specified)
         provider = model.get("provider", "openrouter")
         
-        # Get model name based on provider
-        if provider == "openrouter":
-            model_name = model.get("openrouter_name")
-        else:
-            model_name = model.get("model_name")
+        # Get model name (works for all providers)
+        model_name = model.get("model_name")
         
         if not model_name:
             print(f"Skipping {display_name}: no model name found")

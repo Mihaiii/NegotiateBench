@@ -29,14 +29,14 @@ class TestProviderSupport:
         assert len(aihubmix_models) > 0, "Should have AIHubMix models"
         assert len(human_models) > 0, "Should have human models"
 
-    def test_openrouter_models_have_openrouter_name(self):
-        """Test that OpenRouter models have openrouter_name field."""
+    def test_openrouter_models_have_model_name(self):
+        """Test that OpenRouter models have model_name field."""
         models = load_models()
         openrouter_models = [m for m in models if m.get("provider", "openrouter") == "openrouter" and not m.get("is_human")]
         
         for model in openrouter_models:
-            assert "openrouter_name" in model, f"Model {model['display_name']} should have openrouter_name"
-            assert model["openrouter_name"], f"Model {model['display_name']} openrouter_name should not be empty"
+            assert "model_name" in model, f"Model {model['display_name']} should have model_name"
+            assert model["model_name"], f"Model {model['display_name']} model_name should not be empty"
 
     def test_aihubmix_models_have_model_name_and_provider(self):
         """Test that AIHubMix models have model_name and provider fields."""

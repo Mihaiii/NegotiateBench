@@ -7,6 +7,7 @@ class Agent:
         self.total_value = sum(c * v for c, v in zip(counts, values))
         self.turn_count = 0
         self.opponent_offers = []
+        self.my_offers = []
         
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn_count += 1
@@ -18,96 +19,102 @@ class Agent:
             self.opponent_offers.append(o)
             offer_value = sum(o[i] * self.values[i] for i in range(len(o)))
             
-            # Acceptance logic based on time pressure
+            # Calculate minimum acceptable based on time pressure
             if turns_remaining == 1:
-                # Last possible turn - accept anything positive
+                # Last turn - accept anything positive
                 if offer_value > 0:
                     return None
-            elif turns_remaining <= 3:
-                # Very late game - accept if >= 25% of total
-                if offer_value >= self.total_value * 0.25:
+            elif turns_remaining <= 2:
+                # Very last moments - accept if >= 20% of total
+                if offer_value >= self.total_value * 0.2:
                     return None
-            elif turns_remaining <= 6:
-                # Late game - accept if >= 35% of total  
-                if offer_value >= self.total_value * 0.35:
+            elif turns_remaining <= 4:
+                # Near deadline - accept if >= 30% of total
+                if offer_value >= self.total_value * 0.3:
                     return None
-            elif turns_remaining <= 12:
-                # Mid game - accept if >= 45% of total
-                if offer_value >= self.total_value * 0.45:
+            elif turns_remaining <= 8:
+                # Moderate pressure - accept if >= 40% of total
+                if offer_value >= self.total_value * 0.4:
                     return None
             else:
-                # Early game - accept if >= 55% of total
-                if offer_value >= self.total_value * 0.55:
+                # Early game - be selective, accept if >= 50% of total
+                if offer_value >= self.total_value * 0.5:
                     return None
         
         # Generate counter-offer
-        # Calculate target value based on time pressure
-        if turns_remaining <= 2:
-            target_ratio = 0.4  # Be generous near deadline
-        elif turns_remaining <= 6:
-            target_ratio = 0.5
-        elif turns_remaining <= 12:
-            target_ratio = 0.6
-        else:
-            target_ratio = 0.7  # Start ambitious
-        
-        target_value = self.total_value * target_ratio
-        
-        # Create proposal by taking valuable items first
         proposal = [0] * len(self.counts)
-        current_value = 0
         
-        # Sort items by our value (descending)
-        item_indices = sorted(range(len(self.values)), key=lambda i: self.values[i], reverse=True)
-        
-        # If we have opponent offers, adjust based on what they keep
-        opponent_patterns = {}
-        if self.opponent_offers:
-            for i in range(len(self.counts)):
-                # Calculate how much opponent typically keeps for themselves
-                # (total - what they offer us)
-                avg_opponent_keeps = sum(self.counts[i] - offer[i] for offer in self.opponent_offers) / len(self.opponent_offers)
-                opponent_patterns[i] = avg_opponent_keeps / self.counts[i] if self.counts[i] > 0 else 0
-        
-        for i in item_indices:
-            if self.values[i] <= 0:
-                continue
-                
-            # Determine how much we can reasonably take
-            max_available = self.counts[i]
-            
-            # If opponent consistently keeps most of this item, be more willing to concede
-            if i in opponent_patterns and opponent_patterns[i] > 0.7:
-                # They really want this item - take less
-                max_take = max(0, int(max_available * 0.3))
-            elif i in opponent_patterns and opponent_patterns[i] > 0.5:
-                # They somewhat want this - take moderately
-                max_take = max(0, int(max_available * 0.5))
-            else:
-                # They don't seem to care - take more
-                max_take = max_available
-            
-            # Take what we need to reach target
-            if current_value < target_value and max_take > 0:
-                value_needed = target_value - current_value
-                items_needed = min(max_take, (value_needed + self.values[i] - 1) // self.values[i])
-                proposal[i] = int(items_needed)
-                current_value += items_needed * self.values[i]
-        
-        # Handle first move specially - be ambitious but not greedy
-        if self.turn_count == 1 and o is None:
-            proposal = []
+        # If we have no history, start with ambitious offer
+        if not self.opponent_offers and o is None:
+            # First move: take everything valuable to us
             for i in range(len(self.counts)):
                 if self.values[i] > 0:
-                    # Take 80-100% of valuable items, but not necessarily all
-                    take_ratio = 0.8 if self.counts[i] > 1 else 1.0
-                    take_amount = min(self.counts[i], max(1, int(self.counts[i] * take_ratio)))
-                    proposal.append(take_amount)
+                    proposal[i] = self.counts[i]
                 else:
-                    proposal.append(0)
+                    proposal[i] = 0
+        elif not self.opponent_offers and o is not None:
+            # First response: analyze what they offered us
+            # They offered us 'o', so they want to keep (counts - o)
+            # Take everything that's valuable to us, but be slightly more reasonable
+            for i in range(len(self.counts)):
+                if self.values[i] > 0:
+                    # Take most of valuable items, but maybe leave a little
+                    if self.counts[i] > 1:
+                        proposal[i] = self.counts[i] - 1  # Leave 1 for them
+                    else:
+                        proposal[i] = self.counts[i]
+                else:
+                    proposal[i] = 0
+        else:
+            # We have history - analyze what they consistently reject
+            # Find items where we might be overreaching
+            opponent_wants = [0] * len(self.counts)
+            my_last_offer = self.my_offers[-1] if self.my_offers else None
+            
+            # If we have a last offer and they rejected it, see what we took that they might want
+            if my_last_offer is not None and len(self.opponent_offers) >= 1:
+                # Their latest offer shows what they're willing to give us
+                latest_opponent_offer = self.opponent_offers[-1]
+                # Items we took in our last offer but they're not giving us in their offer
+                # are likely valuable to them
+                for i in range(len(self.counts)):
+                    if my_last_offer[i] > latest_opponent_offer[i]:
+                        # We're taking more than they're willing to give - they probably want this item
+                        opponent_wants[i] = 1
+            
+            # Build proposal: prioritize items valuable to us, avoid items opponent seems to want
+            item_indices = sorted(range(len(self.values)), key=lambda i: self.values[i], reverse=True)
+            
+            # Determine how generous to be based on time pressure
+            if turns_remaining <= 2:
+                generosity = 0.4  # Very generous near deadline
+            elif turns_remaining <= 4:
+                generosity = 0.3
+            elif turns_remaining <= 8:
+                generosity = 0.2
+            else:
+                generosity = 0.1  # Not very generous early on
+            
+            for i in item_indices:
+                if self.values[i] <= 0:
+                    proposal[i] = 0
+                    continue
+                
+                # Base amount: take most of what's valuable to us
+                base_take = self.counts[i]
+                
+                # If opponent seems to want this item, be more generous
+                if opponent_wants[i]:
+                    # Reduce our take based on time pressure
+                    reduction = int(self.counts[i] * generosity)
+                    proposal[i] = max(0, base_take - reduction)
+                else:
+                    # We can be more aggressive
+                    proposal[i] = base_take
         
         # Ensure validity
         for i in range(len(proposal)):
             proposal[i] = max(0, min(proposal[i], self.counts[i]))
         
+        self.my_offers.append(proposal.copy())
         return proposal

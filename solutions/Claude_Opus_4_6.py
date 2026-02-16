@@ -6,31 +6,31 @@ class Agent:
         self.max_rounds = max_rounds
         self.n = len(counts)
         self.total = sum(c * v for c, v in zip(counts, values))
+        self.total_turns = max_rounds * 2
+        self.turn = 0
         self.opponent_offers = []
         self.my_offers = []
-        self.turn = 0
-        self.total_turns = max_rounds * 2
+        self.best_received_val = 0
+        self.best_received = None
 
-        # Enumerate all possible splits if feasible
+        # Enumerate all splits if feasible
         space_size = 1
         for c in counts:
             space_size *= (c + 1)
-            if space_size > 200000:
+            if space_size > 500000:
                 break
-        
-        self.all_splits = None
-        if space_size <= 200000:
-            self.all_splits = []
+
+        self.all_splits = []
+        if space_size <= 500000:
             self._enumerate(0, [])
-        
-        # Generate plausible opponent valuations
-        self.opp_hypotheses = self._generate_hypotheses(60)
+
+        # Generate opponent hypotheses
+        self.opp_hypotheses = self._generate_hypotheses()
         self.hyp_weights = [1.0] * len(self.opp_hypotheses)
-        
-        # Track best offer received
-        self.best_offer_val = 0
-        self.best_offer = None
-        self.last_offer_made = None
+
+        # Precompute Pareto frontier for each hypothesis
+        self.concession_schedule = []
+        self.offer_history_set = set()
 
     def _enumerate(self, idx, current):
         if idx == self.n:
@@ -47,169 +47,112 @@ class Agent:
     def _opp_value_remainder(self, my_split, opp_vals):
         return sum(opp_vals[i] * (self.counts[i] - my_split[i]) for i in range(self.n))
 
-    def _generate_hypotheses(self, count):
-        """Generate plausible opponent value vectors that sum to self.total."""
+    def _generate_hypotheses(self):
+        """Generate diverse plausible opponent valuations summing to self.total."""
         import random
-        rng = random.Random(12345)
+        rng = random.Random(42)
         hypotheses = []
-        
-        # Items with counts
-        non_zero = [i for i in range(self.n) if self.counts[i] > 0]
-        if not non_zero:
+        seen = set()
+
+        non_zero_indices = [i for i in range(self.n) if self.counts[i] > 0]
+        if not non_zero_indices or self.total == 0:
             return [[0] * self.n]
-        
-        for _ in range(count * 5):
-            if len(hypotheses) >= count:
-                break
+
+        # Systematic generation: try all ways to assign integer per-unit values
+        # Use recursive distribution of total across item types
+        def distribute(remaining, idx, current):
+            if len(hypotheses) > 300:
+                return
+            if idx == len(non_zero_indices):
+                if remaining == 0:
+                    h = [0] * self.n
+                    for j, ii in enumerate(non_zero_indices):
+                        h[ii] = current[j]
+                    key = tuple(h)
+                    if key not in seen:
+                        seen.add(key)
+                        hypotheses.append(h)
+                return
+            i = non_zero_indices[idx]
+            c = self.counts[i]
+            max_per = remaining // c
+            for v in range(max_per + 1):
+                current.append(v)
+                distribute(remaining - v * c, idx + 1, current)
+                current.pop()
+
+        if len(non_zero_indices) <= 6 and self.total <= 50:
+            distribute(self.total, 0, [])
+
+        # If too few or too many, supplement with random
+        attempts = 0
+        while len(hypotheses) < 200 and attempts < 2000:
+            attempts += 1
             vals = [0] * self.n
-            # Random allocation of total value
             remaining = self.total
-            indices = list(range(self.n))
+            indices = non_zero_indices[:]
             rng.shuffle(indices)
-            
+
             for j, i in enumerate(indices):
-                if self.counts[i] == 0:
-                    vals[i] = 0
-                    continue
+                c = self.counts[i]
                 if j == len(indices) - 1:
-                    # Last item gets remainder
-                    per_unit = remaining // self.counts[i] if self.counts[i] > 0 else 0
-                    vals[i] = per_unit
-                    remaining -= per_unit * self.counts[i]
-                else:
-                    max_per = remaining // self.counts[i] if self.counts[i] > 0 else 0
-                    if max_per > 0:
-                        per_unit = rng.randint(0, max_per)
+                    if remaining % c == 0:
+                        vals[i] = remaining // c
+                        remaining = 0
                     else:
-                        per_unit = 0
-                    vals[i] = per_unit
-                    remaining -= per_unit * self.counts[i]
-            
-            # Check if we used exactly total
-            actual = sum(vals[i] * self.counts[i] for i in range(self.n))
-            if actual <= self.total and remaining >= 0:
-                # Distribute remainder
-                if remaining > 0:
-                    for i in indices:
-                        if self.counts[i] > 0:
-                            add = remaining // self.counts[i]
-                            if add > 0:
-                                vals[i] += add
-                                remaining -= add * self.counts[i]
-                actual = sum(vals[i] * self.counts[i] for i in range(self.n))
-                if actual == self.total:
-                    hypotheses.append(vals)
-        
-        # Add some "mirror" hypotheses (opponent values what I don't)
-        mirror = [0] * self.n
-        zero_items = [i for i in range(self.n) if self.values[i] == 0 and self.counts[i] > 0]
-        nonzero_items = [i for i in range(self.n) if self.values[i] > 0 and self.counts[i] > 0]
-        
-        if zero_items:
-            total_zero_capacity = sum(self.counts[i] for i in zero_items)
-            if total_zero_capacity > 0:
-                per = self.total // total_zero_capacity
-                rem = self.total - per * total_zero_capacity
-                for i in zero_items:
-                    mirror[i] = per
-                # Distribute remainder
-                for i in zero_items:
-                    if rem >= self.counts[i]:
-                        mirror[i] += 1
-                        rem -= self.counts[i]
-                actual = sum(mirror[i] * self.counts[i] for i in range(self.n))
-                if actual == self.total:
-                    hypotheses.append(mirror[:])
-        
-        # Add uniform
-        total_items = sum(self.counts)
-        if total_items > 0:
-            uni = [0] * self.n
-            rem = self.total
-            for i in range(self.n):
-                if self.counts[i] > 0:
-                    uni[i] = rem // sum(self.counts[j] for j in range(i, self.n) if self.counts[j] > 0)
-                    # Actually simpler: just distribute evenly
-            # Simpler uniform
-            uni_per = self.total // total_items if total_items > 0 else 0
-            uni = [uni_per] * self.n
-            actual = sum(uni[i] * self.counts[i] for i in range(self.n))
-            diff = self.total - actual
-            for i in range(self.n):
-                if diff <= 0:
-                    break
-                if self.counts[i] > 0:
-                    add = min(diff // self.counts[i], 3)
-                    if add > 0:
-                        uni[i] += add
-                        diff -= add * self.counts[i]
-            actual = sum(uni[i] * self.counts[i] for i in range(self.n))
-            if actual == self.total:
-                hypotheses.append(uni)
-        
-        # Inverse of my values
-        if self.total > 0:
-            max_v = max(self.values) if self.values else 1
-            inv = [max(0, max_v - self.values[i]) for i in range(self.n)]
-            inv_total = sum(inv[i] * self.counts[i] for i in range(self.n))
-            if inv_total > 0:
-                scaled = [0] * self.n
-                for i in range(self.n):
-                    scaled[i] = int(round(inv[i] * self.total / inv_total))
-                actual = sum(scaled[i] * self.counts[i] for i in range(self.n))
-                # Adjust
-                diff = self.total - actual
-                for i in range(self.n):
-                    if diff == 0:
                         break
-                    if self.counts[i] > 0:
-                        if diff > 0:
-                            scaled[i] += 1
-                            diff -= self.counts[i]
-                        elif diff < 0:
-                            if scaled[i] > 0:
-                                scaled[i] -= 1
-                                diff += self.counts[i]
-                actual = sum(scaled[i] * self.counts[i] for i in range(self.n))
-                if actual == self.total and all(s >= 0 for s in scaled):
-                    hypotheses.append(scaled)
-        
+                else:
+                    max_per = remaining // c
+                    vals[i] = rng.randint(0, max_per)
+                    remaining -= vals[i] * c
+
+            if remaining == 0:
+                key = tuple(vals)
+                if key not in seen:
+                    seen.add(key)
+                    hypotheses.append(vals)
+
         if not hypotheses:
-            hypotheses.append([self.total // max(1, sum(self.counts))] * self.n)
-        
+            # Fallback
+            hypotheses.append([0] * self.n)
+
         return hypotheses
 
     def _update_weights(self):
-        """Update hypothesis weights based on opponent offers."""
+        """Bayesian update of hypothesis weights based on opponent offers."""
         if not self.opponent_offers:
             return
-        
+
         for h_idx, opp_vals in enumerate(self.opp_hypotheses):
-            likelihood = 1.0
             opp_total = sum(opp_vals[i] * self.counts[i] for i in range(self.n))
             if opp_total == 0:
-                self.hyp_weights[h_idx] = 0.001
+                self.hyp_weights[h_idx] = 1e-6
                 continue
-            
+
+            log_likelihood = 0.0
             for offer in self.opponent_offers:
-                # offer is what opponent gives to ME
+                # offer = what opponent gives to ME
                 # opponent keeps counts[i] - offer[i]
-                opp_keeps_val = sum(opp_vals[i] * (self.counts[i] - offer[i]) for i in range(self.n))
-                # Opponent should offer splits where they keep high value
-                frac = opp_keeps_val / opp_total if opp_total > 0 else 0
-                # Higher fraction kept = more likely under rational behavior
-                # Use softmax-like scoring
-                likelihood *= max(0.001, frac ** 2)
+                opp_keeps = sum(opp_vals[i] * (self.counts[i] - offer[i]) for i in range(self.n))
+                frac = opp_keeps / opp_total
+                # Rational opponent keeps high value for themselves
+                # Use exponential model: P(offer | values) ~ exp(beta * frac)
+                beta = 4.0
+                import math
+                log_likelihood += beta * frac
             
-            self.hyp_weights[h_idx] = max(0.0001, likelihood)
-        
+            import math
+            self.hyp_weights[h_idx] = math.exp(min(50, log_likelihood))
+
         # Normalize
         total_w = sum(self.hyp_weights)
         if total_w > 0:
             self.hyp_weights = [w / total_w for w in self.hyp_weights]
+        else:
+            self.hyp_weights = [1.0 / len(self.opp_hypotheses)] * len(self.opp_hypotheses)
 
     def _expected_opp_values(self):
-        """Get weighted average of opponent values."""
+        """Weighted average of opponent values."""
         self._update_weights()
         expected = [0.0] * self.n
         for h_idx, opp_vals in enumerate(self.opp_hypotheses):
@@ -218,266 +161,316 @@ class Agent:
                 expected[i] += w * opp_vals[i]
         return expected
 
-    def _get_candidates(self, min_val=0):
-        """Get candidate splits sorted by quality."""
-        opp_vals = self._expected_opp_values()
-        
-        if self.all_splits is not None:
-            candidates = []
-            for split in self.all_splits:
-                mv = self._my_value(split)
-                if mv < min_val:
-                    continue
-                ov = self._opp_value_remainder(split, opp_vals)
-                candidates.append((mv, ov, list(split)))
-            return candidates, opp_vals
-        
-        # Heuristic generation for large spaces
+    def _compute_pareto_frontier(self, opp_vals):
+        """Find Pareto-optimal splits (no split dominates another in both my and opp value)."""
+        if not self.all_splits:
+            return []
+
+        scored = []
+        for s in self.all_splits:
+            mv = self._my_value(s)
+            ov = self._opp_value_remainder(s, opp_vals)
+            scored.append((mv, ov, s))
+
+        # Sort by my value descending
+        scored.sort(key=lambda x: (-x[0], -x[1]))
+
+        # Extract Pareto frontier
+        frontier = []
+        max_ov = -1
+        for mv, ov, s in scored:
+            if ov > max_ov:
+                frontier.append((mv, ov, s))
+                max_ov = ov
+
+        return frontier
+
+    def _generate_candidates_large(self, opp_vals, min_my_val):
+        """For large spaces, generate candidates heuristically."""
         import random
-        rng = random.Random(self.turn * 1000 + 42)
-        
+        rng = random.Random(self.turn * 7 + 99)
+
         candidates = []
         seen = set()
-        
-        # Sort items by efficiency ratio: my_value / opp_value
+
+        # Compute efficiency ratios
         ratios = []
         for i in range(self.n):
             if self.counts[i] == 0:
                 continue
             my_per = self.values[i]
             op_per = opp_vals[i]
+            # Ratio of my value to opponent value - higher means I should take it
             ratio = (my_per + 0.01) / (op_per + 0.01)
             ratios.append((ratio, i))
         ratios.sort(reverse=True)
-        
-        # Greedy: take items with best ratio for me first
-        # Generate variations by trying different amounts
-        for trial in range(500):
+
+        # Strategy: greedily take items with best ratio, leave rest for opponent
+        for trial in range(1000):
             split = [0] * self.n
-            
-            if trial == 0:
-                # Pure greedy: take all of items I value most relative to opponent
-                order = [idx for _, idx in ratios]
+
+            if trial < 5:
+                # Greedy with different thresholds
+                thresholds = [2.0, 1.5, 1.0, 0.7, 0.5]
+                thresh = thresholds[trial]
+                for ratio, i in ratios:
+                    if ratio >= thresh:
+                        split[i] = self.counts[i]
+                    elif ratio >= thresh * 0.5:
+                        split[i] = self.counts[i] // 2
+            elif trial < 50:
+                # Systematic: take top-k item types fully
+                k = trial - 5
+                for j, (ratio, i) in enumerate(ratios):
+                    if j < k % (len(ratios) + 1):
+                        split[i] = self.counts[i]
+                    else:
+                        # Partial amounts
+                        split[i] = rng.randint(0, self.counts[i])
             else:
-                order = [idx for _, idx in ratios]
-                # Random perturbation
-                for j in range(len(order)):
-                    if rng.random() < 0.3:
-                        swap = rng.randint(0, len(order) - 1)
-                        order[j], order[swap] = order[swap], order[j]
-            
-            for idx in order:
-                if trial == 0:
-                    split[idx] = self.counts[idx]
-                else:
-                    split[idx] = rng.randint(0, self.counts[idx])
-            
+                # Random with bias toward efficient items
+                for ratio, i in ratios:
+                    p = min(0.95, ratio / (ratio + 1))
+                    expected = int(self.counts[i] * p)
+                    split[i] = min(self.counts[i], max(0,
+                        expected + rng.randint(-1, 1)))
+
             key = tuple(split)
             if key in seen:
                 continue
             seen.add(key)
-            
+
             mv = self._my_value(split)
-            if mv < min_val:
-                continue
             ov = self._opp_value_remainder(split, opp_vals)
             candidates.append((mv, ov, list(split)))
-        
-        # Also add: take everything
-        all_split = list(self.counts)
-        key = tuple(all_split)
-        if key not in seen:
-            mv = self._my_value(all_split)
-            ov = self._opp_value_remainder(all_split, opp_vals)
-            candidates.append((mv, ov, all_split))
-        
-        # Add: take only valued items
-        val_split = [self.counts[i] if self.values[i] > 0 else 0 for i in range(self.n)]
-        key = tuple(val_split)
-        if key not in seen:
-            mv = self._my_value(val_split)
-            ov = self._opp_value_remainder(val_split, opp_vals)
-            candidates.append((mv, ov, val_split))
-        
-        return candidates, opp_vals
+
+        # Add special splits
+        for special in [
+            list(self.counts),  # take all
+            [self.counts[i] if self.values[i] > 0 else 0 for i in range(self.n)],  # take valued
+            [0] * self.n,  # take nothing
+        ]:
+            key = tuple(special)
+            if key not in seen:
+                seen.add(key)
+                mv = self._my_value(special)
+                ov = self._opp_value_remainder(special, opp_vals)
+                candidates.append((mv, ov, special))
+
+        return candidates
 
     def _pick_offer(self, progress):
+        """Select the best offer based on current state."""
         if self.total == 0:
-            return list(self.counts)
-        
+            return [0] * self.n
+
+        opp_vals = self._expected_opp_values()
         turns_left = self.total_turns - self.turn
-        
-        # Determine minimum acceptable value based on progress
-        # Start high, concede gradually with acceleration near end
+
+        # Determine target my_value based on concession curve
+        # Start demanding ~90% of total, concede toward ~35%
         if self.total_turns <= 4:
-            # Very short game - compromise quickly
-            base = 0.65
-            min_frac = base - (base - 0.25) * (progress ** 0.7)
+            start = 0.85
+            end = 0.25
         elif self.total_turns <= 10:
-            base = 0.75
-            min_frac = base - (base - 0.20) * (progress ** 0.8)
+            start = 0.88
+            end = 0.20
         else:
-            base = 0.80
-            min_frac = base - (base - 0.15) * (progress ** 0.9)
-        
-        min_frac = max(0.10, min(0.90, min_frac))
-        min_my_val = self.total * min_frac
-        
-        candidates, opp_vals = self._get_candidates(min_val=max(1, min_my_val * 0.5))
-        
-        if not candidates:
-            candidates, opp_vals = self._get_candidates(min_val=0)
-        
+            start = 0.90
+            end = 0.15
+
+        # Use Boulware-like concession: slow at first, faster near end
+        # progress^beta where beta > 1 = Boulware
+        beta = 3.0
+        concession = progress ** beta
+        target_frac = start - (start - end) * concession
+        target_val = self.total * target_frac
+
+        # Get candidates
+        if self.all_splits:
+            frontier = self._compute_pareto_frontier(opp_vals)
+            candidates = [(mv, ov, list(s)) for mv, ov, s in frontier]
+            # Also add non-frontier splits for variety
+            for s in self.all_splits:
+                mv = self._my_value(s)
+                ov = self._opp_value_remainder(s, opp_vals)
+                candidates.append((mv, ov, list(s)))
+        else:
+            candidates = self._generate_candidates_large(opp_vals, target_val * 0.5)
+
         if not candidates:
             return [self.counts[i] if self.values[i] > 0 else 0 for i in range(self.n)]
-        
-        # Score candidates using Nash-like product
-        # Balance shifts from favoring self early to being more cooperative later
+
+        # Filter: must give me at least target_val (with some flexibility)
+        min_acceptable = max(1, target_val * 0.9)
+
+        # Score candidates
+        # We want: high my_value (at least target) + high opp_value (so they accept)
         best_score = -float('inf')
         best_split = None
-        
+        best_candidates = []
+
         for mv, ov, s in candidates:
-            if mv < min_my_val and mv < self.total:
+            if mv < min_acceptable:
                 continue
-            
-            # Nash bargaining with shifting weight
-            # Early: prioritize my value; Late: prioritize joint gains
-            if mv <= 0 and ov <= 0:
-                score = -1000
-            else:
-                my_w = max(0.1, mv)
-                op_w = max(0.1, ov)
-                # Weighted geometric mean, shifting toward equal weight
-                alpha = 0.65 - 0.25 * progress  # 0.65 early -> 0.40 late
-                score = alpha * (mv / max(1, self.total)) + (1 - alpha) * (ov / max(1, self.total))
-                # Bonus for Pareto efficiency (high total)
-                score += 0.1 * (mv + ov) / max(1, self.total)
-            
-            if score > best_score:
-                best_score = score
-                best_split = s
-        
-        if best_split is None:
-            # Fall back: highest my value
-            candidates.sort(key=lambda x: -x[0])
+
+            # Nash product variant: maximize my_value * opp_value
+            # But weight my_value more early, opponent value more late
+            if ov < 0:
+                ov = 0
+
+            # Score: prioritize offers opponent is likely to accept
+            # while maintaining our minimum
+            opp_total = sum(opp_vals[i] * self.counts[i] for i in range(self.n))
+            opp_frac = ov / max(1, opp_total)
+
+            # The opponent needs to get enough to want to accept
+            # Estimate: they need at least (1-progress^2) * their total in early rounds
+            # and less later
+            opp_min_frac = max(0.1, 0.5 * (1 - progress))
+
+            score = mv  # Base: maximize my value
+            # Bonus for giving opponent enough to accept
+            if opp_frac >= 0.3:
+                score += mv * 0.3  # Feasibility bonus
+            if opp_frac >= 0.5:
+                score += mv * 0.2
+
+            # Nash component (grows with progress)
+            nash_weight = 0.3 + 0.7 * progress
+            if mv > 0 and ov > 0:
+                import math
+                nash = math.sqrt(mv * ov)
+                score += nash_weight * nash
+
+            best_candidates.append((score, mv, ov, s))
+
+        if not best_candidates:
+            # Lower threshold
+            min_acceptable = max(1, target_val * 0.5)
             for mv, ov, s in candidates:
-                best_split = s
-                break
-        
-        if best_split is None:
-            best_split = [self.counts[i] if self.values[i] > 0 else 0 for i in range(self.n)]
-        
-        # Anti-repetition: if we've made the same offer 2+ times, try to vary
-        if self.my_offers and len(self.my_offers) >= 2:
-            if all(o == best_split for o in self.my_offers[-2:]):
-                # Find next best that's different
-                scored = []
-                for mv, ov, s in candidates:
-                    if s == best_split:
-                        continue
-                    if mv >= min_my_val * 0.85:
-                        my_w = max(0.1, mv)
-                        op_w = max(0.1, ov)
-                        alpha = 0.65 - 0.25 * progress
-                        sc = alpha * (mv / max(1, self.total)) + (1 - alpha) * (ov / max(1, self.total))
-                        sc += 0.1 * (mv + ov) / max(1, self.total)
-                        scored.append((sc, s))
-                
-                if scored:
-                    scored.sort(key=lambda x: -x[0])
-                    best_split = scored[0][1]
-        
-        return best_split
+                if mv < min_acceptable:
+                    continue
+                score = mv + 0.5 * max(0, ov)
+                best_candidates.append((score, mv, ov, s))
+
+        if not best_candidates:
+            # Take highest value for me
+            candidates.sort(key=lambda x: -x[0])
+            return candidates[0][2]
+
+        best_candidates.sort(key=lambda x: -x[0])
+
+        # Pick best that we haven't offered too many times
+        offer_counts = {}
+        for prev in self.my_offers:
+            key = tuple(prev)
+            offer_counts[key] = offer_counts.get(key, 0) + 1
+
+        for score, mv, ov, s in best_candidates:
+            key = tuple(s)
+            if offer_counts.get(key, 0) < 3:
+                return s
+
+        # If all top candidates exhausted, pick the best anyway
+        return best_candidates[0][3]
 
     def _should_accept(self, o, progress):
+        """Decide whether to accept the opponent's offer."""
         my_val = self._my_value(o)
         turns_left = self.total_turns - self.turn
-        
+
+        # Always accept full value
         if my_val >= self.total:
             return True
-        
+
+        # Never accept 0 if we have positive total
         if my_val <= 0 and self.total > 0:
-            # Only accept 0 if we're about to get nothing anyway and can't do better
-            if turns_left <= 0:
-                return False  # 0 = no deal anyway
             return False
-        
-        # What would we offer next?
-        # Don't actually call _pick_offer to avoid side effects; estimate
-        if self.total_turns <= 4:
-            base = 0.65
-            target = base - (base - 0.25) * (progress ** 0.7)
-        elif self.total_turns <= 10:
-            base = 0.75
-            target = base - (base - 0.20) * (progress ** 0.8)
-        else:
-            base = 0.80
-            target = base - (base - 0.15) * (progress ** 0.9)
-        
-        target = max(0.10, min(0.90, target))
-        target_val = self.total * target
-        
-        # Discount for risk of no deal
-        # As turns decrease, increase willingness to accept
+
+        my_frac = my_val / max(1, self.total)
+
+        # If this is the last turn where we can accept, be generous
+        # (if we reject, we need to make an offer that opponent accepts on their last turn,
+        #  or we get nothing)
         if turns_left <= 0:
-            # This is the very last chance
+            # This IS the last action. Accept anything > 0.
             return my_val >= 1
-        elif turns_left <= 1:
-            # One more turn at most
-            return my_val >= max(1, self.total * 0.08)
-        elif turns_left <= 2:
-            return my_val >= max(1, self.total * 0.12)
-        elif turns_left <= 4:
-            return my_val >= max(1, self.total * 0.18)
-        
-        # Accept if offer meets or exceeds what we'd target
-        if my_val >= target_val:
+
+        if turns_left <= 1:
+            # After this, opponent gets one more chance or it's over
+            # Accept if reasonable
+            return my_val >= max(1, self.total * 0.05)
+
+        if turns_left <= 2:
+            return my_val >= max(1, self.total * 0.10)
+
+        if turns_left <= 4:
+            return my_val >= max(1, self.total * 0.15)
+
+        # Compute what we'd target with our next offer
+        beta = 3.0
+        if self.total_turns <= 4:
+            start, end = 0.85, 0.25
+        elif self.total_turns <= 10:
+            start, end = 0.88, 0.20
+        else:
+            start, end = 0.90, 0.15
+
+        # What would next turn's progress be?
+        next_progress = self.turn / max(1, self.total_turns - 1)
+        concession = next_progress ** beta
+        next_target_frac = start - (start - end) * concession
+        next_target_val = self.total * next_target_frac
+
+        # Accept if offer >= our next target (we'd be happy to get this)
+        if my_val >= next_target_val:
             return True
-        
-        # Accept if >= 50% of total (fair split)
-        if my_val >= self.total * 0.50:
+
+        # Accept if >= 50%
+        if my_frac >= 0.50:
             return True
-        
-        # Accept if >= 40% and we're past early game
-        if my_val >= self.total * 0.40 and progress > 0.25:
+
+        # Accept if >= 40% and past early game
+        if my_frac >= 0.40 and progress > 0.3:
             return True
-        
-        # Accept if >= 30% and we're past midpoint  
-        if my_val >= self.total * 0.30 and progress > 0.5:
+
+        # Accept if >= 30% and past mid game
+        if my_frac >= 0.30 and progress > 0.5:
             return True
-        
-        # Accept if opponent is getting more generous and offer is reasonable
-        if len(self.opponent_offers) >= 2:
-            prev_val = self._my_value(self.opponent_offers[-2])
-            if my_val > prev_val and my_val >= self.total * 0.25:
-                if progress > 0.3:
-                    return True
-        
-        # If best we've ever been offered is this or worse, and time running out
-        if turns_left <= 6 and my_val >= max(1, self.total * 0.20):
+
+        # Accept if >= 20% and near end
+        if my_frac >= 0.20 and progress > 0.75:
             return True
-        
+
+        # Accept if this is the best offer we've received and we're past halfway
+        # and it's at least somewhat reasonable
+        if my_val >= self.best_received_val and my_frac >= 0.15 and progress > 0.6:
+            return True
+
+        # Accept if opponent is improving offers and we're past midway
+        if len(self.opponent_offers) >= 2 and progress > 0.4:
+            recent_vals = [self._my_value(x) for x in self.opponent_offers[-3:]]
+            if my_val >= max(recent_vals) and my_frac >= 0.20:
+                return True
+
         return False
 
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn += 1
-        
+        progress = (self.turn - 1) / max(1, self.total_turns - 1)
+
         if o is not None:
             self.opponent_offers.append(o[:])
             val = self._my_value(o)
-            if val > self.best_offer_val:
-                self.best_offer_val = val
-                self.best_offer = o[:]
-        
-        progress = (self.turn - 1) / max(1, self.total_turns - 1)
-        
-        # Acceptance check
-        if o is not None:
+            if val > self.best_received_val:
+                self.best_received_val = val
+                self.best_received = o[:]
+
             if self._should_accept(o, progress):
                 return None
-        
+
         # Generate counter-offer
         best = self._pick_offer(progress)
         self.my_offers.append(best[:])
-        self.last_offer_made = best[:]
         return best

@@ -25,7 +25,7 @@ class Agent:
         num_off = len(self.partner_offers)
         avg_taken = [0.0] * self.n_types
         sum_weights = 0.0
-        alpha = 0.8
+        alpha = 0.5
         for k in range(num_off):
             weight = alpha ** (num_off - 1 - k)
             o = self.partner_offers[k]
@@ -56,7 +56,7 @@ class Agent:
         is_penultimate = current_turn == self.max_turns - 1
         progress = current_turn / self.max_turns if self.max_turns > 0 else 1.0
         v_partner = self.estimate_v_partner()
-        power = 5
+        power = 3
         g = progress ** power
         if is_last_turn:
             min_accept = 1e-6
@@ -68,7 +68,7 @@ class Agent:
             if self.has_advantage:
                 my_share_frac = 0.75 - 0.25 * g
             else:
-                my_share_frac = 0.65 - 0.40 * g
+                my_share_frac = 0.6 - 0.2 * g
             min_accept = self.total * my_share_frac
             partner_threshold = self.total * (1 - my_share_frac)
         if o is not None:
@@ -84,13 +84,13 @@ class Agent:
         if not is_last_turn:
             target = partner_threshold
             if is_penultimate:
-                target = 0.01
+                target = self.total * 0.01
             remaining_needed = target - current_util
             if remaining_needed > 0:
                 candidates = [i for i in range(self.n_types) if v_partner[i] > 0 and self.values[i] > 0 and self.counts[i] - m[i] > 0]
                 if candidates:
                     if is_penultimate or remaining_needed < 1.0:
-                        min_unit_v = self.total / 5.0
+                        min_unit_v = self.total / 10.0
                         safe_candidates = [i for i in candidates if v_partner[i] >= min_unit_v]
                         if safe_candidates:
                             safe_candidates.sort(key=lambda i: (self.values[i], -v_partner[i]))

@@ -1,89 +1,91 @@
 class Agent:
     def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
+        self.me = me
         self.counts = counts
         self.values = values
-        self.me = me
         self.max_rounds = max_rounds
-        self.round = 0
         self.total = sum(c * v for c, v in zip(counts, values))
-        # Compute best possible allocation for myself (max value to me)
-        self.best_allocation = self._compute_best_allocation()
-
-    def _compute_best_allocation(self) -> list[int]:
+        # Compute my best possible allocation (maximize my value)
+        self.best_allocation = self._compute_best()
+        # Track round number (increments each time we make an offer)
+        self.round = 0
+        
+    def _compute_best(self) -> list[int]:
         """Compute allocation that maximizes my value."""
-        # Start with all items
         alloc = self.counts.copy()
-        # Remove items worth 0 to me
         for i in range(len(self.values)):
             if self.values[i] == 0:
                 alloc[i] = 0
         return alloc
-
-    def _compute_value(self, allocation: list[int]) -> int:
+    
+    def _value(self, alloc: list[int]) -> int:
         """Compute my value for an allocation."""
-        return sum(a * v for a, v in zip(allocation, self.values))
-
-    def _get_threshold(self) -> float:
-        """Get minimum value threshold based on remaining rounds."""
-        # Decline threshold as rounds decrease
-        # Start high, but accept less as time runs out
-        remaining = self.max_rounds - self.round
-        if remaining <= 0:
-            return 0.0
-        # Linear decline from ~60% to ~30% of total value
-        return max(0.3, 0.6 - (self.max_rounds - remaining) * 0.3 / max(1, self.max_rounds))
-
+        return sum(a * v for a, v in zip(alloc, self.values))
+    
+    def _threshold(self) -> float:
+        """Minimum value I'll accept, declining as rounds run out."""
+        # Start with 45% and decline to 25% as time runs out
+        progress = self.round / max(1, self.max_rounds)
+        return max(0.25, 0.45 - progress * 0.2)
+    
     def offer(self, o: list[int] | None) -> list[int] | None:
-        # First turn: me == 0 and o is None
+        # First turn: o is None
         if o is None:
-            # My first offer - propose a fair split
-            my_offer = self.best_allocation.copy()
-            # Scale down if too greedy (give partner at least 40%)
-            my_value = self._compute_value(my_offer)
-            if my_value > self.total * 0.6:
-                # Reduce some items to be more reasonable
-                for i in range(len(self.counts)):
-                    if self.counts[i] > 0 and self.values[i] > 0:
-                        my_offer[i] = max(0, my_offer[i] - 1)
-                        if self._compute_value(my_offer) <= self.total * 0.6:
-                            break
-            return my_offer
-
-        # Increment round counter when I receive an offer
-        self.round += 1
-
-        # Calculate value of offer to me
-        offer_value = self._compute_value(o)
-        threshold = self._get_threshold() * self.total
-
-        # Accept if offer meets threshold
-        if offer_value >= threshold:
-            return None
-
-        # Counter-offer: try to get best value while being reasonable
-        # Give partner at least what they offered (inferred from their preference)
-        # Start with my best, then compromise based on rounds left
+            # If I'm second (me=1), return None to wait for first offer
+            if self.me == 1:
+                return None
+            
+            # First offer: propose a fair split (~55% for me)
+            offer = self.best_allocation.copy()
+            target = self.total * 0.55
+            
+            # Reduce items until we hit target
+            while self._value(offer) > target:
+                # Remove from lowest value-to-count ratio items first
+                for i in range(len(self.values)):
+                    if offer[i] > 0 and self.values[i] > 0:
+                        offer[i] -= 1
+                        break
+            return offer
         
+        # Received an offer - check if I should accept
+        offer_value = self._value(o)
+        min_accept = self.total * self._threshold()
+        
+        # Check if this is my turn or partner's (o is partner's offer)
+        # Increment round when I make a counter-offer
+        self.round += 1
+        
+        if offer_value >= min_accept:
+            # Accept!
+            return None
+        
+        # Make counter-offer
+        # Strategy: start from best, gradually concede based on remaining rounds
         remaining = self.max_rounds - self.round
-        if remaining <= 1:
-            # Last chance - accept almost anything
-            if offer_value > 0:
-                return o  # Accept their offer by mirroring it (they get what they offered)
-            # If offer is 0, try my best anyway
-            return self.best_allocation
-
-        # Make a counter-offer: start with my best, gradually reduce
+        target = self.total * max(0.30, 0.55 - (self.round / max(1, self.max_rounds)) * 0.25)
+        
         counter = self.best_allocation.copy()
         
-        # Try to find a reasonable middle ground
-        # Give partner some items they seem to want (based on their offer)
-        partner_items = [self.counts[i] - o[i] for i in range(len(o))]
+        # Concede more as time runs out
+        # Reduce items from low-value-per-unit items first
+        items_to_remove = min(remaining + 1, sum(self.counts))
         
-        # Reduce my demands slightly each round
-        for i in range(len(self.values)):
-            if counter[i] > 0 and self.values[i] > 0:
-                # Keep at least some items valuable to me
-                if self._compute_value(counter) > threshold * 1.2:
-                    counter[i] = max(0, counter[i] - 1)
+        while self._value(counter) > target and items_to_remove > 0:
+            # Find item with lowest value-to-count ratio
+            best_idx = -1
+            best_ratio = float('inf')
+            for i in range(len(counter)):
+                if counter[i] > 0 and self.values[i] > 0:
+                    ratio = self.values[i]  # Higher value = keep longer
+                    if ratio < best_ratio:
+                        best_ratio = ratio
+                        best_idx = i
+            
+            if best_idx >= 0:
+                counter[best_idx] -= 1
+                items_to_remove -= 1
+            else:
+                break
         
         return counter

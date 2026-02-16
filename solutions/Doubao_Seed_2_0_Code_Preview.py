@@ -18,7 +18,6 @@ class Agent:
                 self.value_groups[v] = []
             self.value_groups[v].append(i)
         self.turn_count = 0
-        self.last_offer = None
         self.partner_offer_values = []
         self.my_offer_values = []
         self.best_partner_offer = -1
@@ -37,33 +36,42 @@ class Agent:
         
         # Handle acceptance if we received an offer
         if o is not None:
-            offer_value = sum(oi * vi for oi, vi in zip(o, self.values))
-            self.partner_offer_values.append(offer_value)
-            
-            # Update best partner offer
-            if offer_value > self.best_partner_offer:
-                self.best_partner_offer = offer_value
-            
-            # Accept immediately if we value nothing or get everything
-            if self.my_total == 0 or offer_value >= self.my_total:
-                return None
-            
-            # Calculate acceptance threshold
-            if actual_turn == self.total_turns:
-                threshold = 0  # Accept anything non-negative on last turn
+            # Validate offer first
+            valid = True
+            for i in range(len(o)):
+                if not isinstance(o[i], int) or o[i] < 0 or o[i] > self.counts[i]:
+                    valid = False
+                    break
+            if not valid:
+                # Invalid offer, walk away? Wait no, better to counter, but let's just not accept
+                pass
             else:
-                progress = (actual_turn - 1) / (self.total_turns - 1) if self.total_turns > 1 else 0.0
-                threshold = self.my_total * (0.9 - 0.4 * progress)
-            
-            # Slight threshold reduction if partner is improving their offer
-            if len(self.partner_offer_values) >= 2:
-                if self.partner_offer_values[-1] > self.partner_offer_values[-2]:
-                    threshold = max(0, threshold - 0.05 * self.my_total)
-            
-            # Check if we should accept: must meet threshold, and be best offer or last turn
-            is_best_offer = offer_value >= self.best_partner_offer
-            if (offer_value >= threshold) and (is_best_offer or actual_turn == self.total_turns):
-                return None
+                offer_value = sum(oi * vi for oi, vi in zip(o, self.values))
+                self.partner_offer_values.append(offer_value)
+                
+                # Update best partner offer
+                if offer_value > self.best_partner_offer:
+                    self.best_partner_offer = offer_value
+                
+                # Accept immediately if we value nothing or get everything
+                if self.my_total == 0 or offer_value >= self.my_total:
+                    return None
+                
+                # Calculate acceptance threshold
+                if actual_turn == self.total_turns:
+                    threshold = 0  # Accept anything non-negative on last turn
+                else:
+                    progress = (actual_turn - 1) / (self.total_turns - 1) if self.total_turns > 1 else 0.0
+                    threshold = self.my_total * (0.9 - 0.4 * progress)
+                
+                # Slight threshold reduction if partner is improving their offer
+                if len(self.partner_offer_values) >= 2:
+                    if self.partner_offer_values[-1] > self.partner_offer_values[-2]:
+                        threshold = max(0, threshold - 0.05 * self.my_total)
+                
+                # Check if we should accept
+                if offer_value >= threshold:
+                    return None
         
         # Generate our counter-offer
         # Calculate progress and initial offer fraction
@@ -108,8 +116,8 @@ class Agent:
                 if available == 0:
                     continue
                 
-                # Calculate how many we can give up without going below target
-                max_give = min(available, (current_value - offer_target) // val)
+                # Calculate how many we can give up without going below target (ensure integer)
+                max_give = min(available, int((current_value - offer_target) // val))
                 if max_give > 0:
                     my_split[idx] -= max_give
                     current_value -= max_give * val
@@ -150,8 +158,10 @@ class Agent:
                             current_value = new_value
                             break
         
+        # Ensure all elements are integers
+        my_split = [int(x) for x in my_split]
+        
         # Update tracking variables
-        self.last_offer = my_split.copy()
         final_tuple = tuple(my_split)
         self.previous_my_offers.add(final_tuple)
         self.my_offer_values.append(current_value)

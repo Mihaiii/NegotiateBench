@@ -4,11 +4,12 @@ class Agent:
         self.counts = list(counts)
         self.values = list(values)
         self.n = len(counts)
+        self.max_rounds = max_rounds
         self.total_turns = max_rounds * 2
         self.turn = 0
         self.total_value = sum(c * v for c, v in zip(counts, values))
         
-        # Initialize opponent value estimates (uniform prior)
+        # Initialize opponent values with uniform prior
         total_items = sum(counts)
         if total_items > 0:
             avg = self.total_value / total_items
@@ -16,105 +17,111 @@ class Agent:
         else:
             self.opp_values = [0] * self.n
         
+        # Track opponent offers to detect patterns
+        self.opp_history = []
+    
     def offer(self, o):
         self.turn += 1
         remaining = self.total_turns - self.turn
         
         if o is not None:
-            self._update_opponent_model(o)
-            my_value = sum(x * v for x, v in zip(o, self.values))
+            self.opp_history.append(list(o))
+            self._update_model(o)
             
-            # Acceptance strategy: threshold decreases from 75% to 25% as time passes
-            # Last turn: accept anything > 0
+            my_value = sum(a * b for a, b in zip(o, self.values))
+            
+            # Acceptance strategy with time decay
             if remaining == 0:
+                # Last possible turn - accept anything positive
                 if my_value > 0:
                     return None
             else:
+                # Threshold decays from 65% to 15% as time progresses
                 progress = self.turn / self.total_turns
-                threshold = self.total_value * (0.75 - 0.50 * progress)
+                threshold = self.total_value * (0.65 - 0.50 * progress)
+                
                 if my_value >= threshold:
                     return None
+                
+                # Late game: accept if we get at least 35%
+                if progress > 0.75 and my_value >= self.total_value * 0.35:
+                    return None
         
-        return self._create_offer()
+        return self._create_offer(remaining)
     
-    def _update_opponent_model(self, o):
+    def _update_model(self, o):
         """Update opponent value estimates based on their offer."""
-        # Opponent offers us 'o', keeps (counts - o)
+        # Opponent keeps (counts - o), offers us o
         kept = [self.counts[i] - o[i] for i in range(self.n)]
         
         for i in range(self.n):
             if self.counts[i] == 0:
                 continue
-                
-            give_ratio = o[i] / self.counts[i]
-            keep_ratio = kept[i] / self.counts[i]
             
-            # If they give us items, they likely value them less
-            # If they keep items, they likely value them more
-            current = self.opp_values[i]
+            give_frac = o[i] / self.counts[i]
+            keep_frac = kept[i] / self.counts[i]
             
-            if give_ratio == 1.0:
-                inferred = 0  # They gave all -> value is 0
-            elif keep_ratio == 1.0:
-                inferred = self.total_value / self.n  # They kept all -> value is high
+            # Infer value: keeping all -> high value, giving all -> low value
+            if give_frac >= 0.99:
+                inferred = 0
+            elif keep_frac >= 0.99:
+                inferred = self.total_value / self.n * 1.5
             else:
                 # Linear interpolation based on keep/give ratio
-                inferred = (self.total_value / self.n) * (0.5 + 0.5 * (keep_ratio - give_ratio))
+                base = self.total_value / self.n
+                inferred = base * (0.5 + (keep_frac - give_frac))
+                inferred = max(0, inferred)
             
-            # Smooth update
-            self.opp_values[i] = 0.7 * current + 0.3 * inferred
+            # Exponential smoothing
+            self.opp_values[i] = 0.7 * self.opp_values[i] + 0.3 * inferred
         
-        # Normalize to maintain total value constraint
+        # Renormalize to maintain total value constraint
         curr_total = sum(v * c for v, c in zip(self.opp_values, self.counts))
         if curr_total > 0:
             scale = self.total_value / curr_total
             self.opp_values = [v * scale for v in self.opp_values]
     
-    def _create_offer(self):
-        """Generate offer using constrained optimization."""
+    def _create_offer(self, remaining):
+        """Generate offer using comparative advantage and concession strategy."""
+        # Target value decreases from 80% to 40% as we concede over time
         progress = self.turn / self.total_turns if self.total_turns > 0 else 1
+        target_ratio = 0.80 - 0.40 * progress
+        target_value = self.total_value * max(0.40, target_ratio)
         
-        # Assume opponent wants at least reservation value (decreasing from 75% to 25%)
-        opp_reservation = self.total_value * (0.75 - 0.50 * progress)
-        
-        # Budget: how much value can we "take" from opponent without making them reject
-        budget = self.total_value - opp_reservation
-        
-        # Sort items by efficiency: our_value / opponent_value
-        # Take items that give us high value while costing opponent low value
+        # Sort items by comparative advantage (our value - their estimated value)
+        # High advantage = we should take it (we value it more)
         items = []
         for i in range(self.n):
-            ov = self.opp_values[i]
-            mv = self.values[i]
-            if ov <= 0:
-                efficiency = float('inf') if mv > 0 else 0
-            else:
-                efficiency = mv / ov
-            items.append((efficiency, i, mv, ov))
+            advantage = self.values[i] - self.opp_values[i]
+            items.append((advantage, self.values[i], i))
         
-        # Sort descending by efficiency
+        # Sort descending by advantage
         items.sort(reverse=True)
         
         take = [0] * self.n
+        current_value = 0
         
-        for efficiency, i, mv, ov in items:
-            if budget <= 0 and ov > 0:
-                break
-                
-            if mv <= 0:
-                continue  # Don't take worthless items
-            
-            if ov == 0:
-                # Take all items that cost opponent nothing
+        # First pass: take all items with positive advantage that have value to us
+        for advantage, my_val, i in items:
+            if advantage >= 0 and my_val > 0:
                 take[i] = self.counts[i]
-            else:
-                # Take as many as budget allows
-                max_take = int(budget // ov)
-                amt = min(self.counts[i], max_take)
-                if amt > 0:
-                    take[i] = amt
-                    budget -= amt * ov
+                current_value += take[i] * my_val
         
-        # Ensure we offer a valid partition (all items accounted for)
-        # The opponent gets (counts - take), which is implicit in the protocol
+        # If we already exceed target, don't be greedy with marginal items
+        if current_value >= target_value:
+            return take
+        
+        # Second pass: take from neutral/negative advantage items if needed to reach target
+        for advantage, my_val, i in items:
+            if current_value >= target_value:
+                break
+            if take[i] > 0 or my_val <= 0:
+                continue
+            
+            needed = target_value - current_value
+            count_needed = int(needed / my_val) + 1
+            amt = min(count_needed, self.counts[i])
+            take[i] = amt
+            current_value += amt * my_val
+        
         return take

@@ -2,161 +2,174 @@ import random
 
 class Agent:
     def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
-        self.me = me
+        self.me = me  # 0: First player, 1: Second player
         self.counts = counts
         self.values = values
         self.max_rounds = max_rounds
-        self.total_value = sum(c * v for c, v in zip(counts, values))
-        self.num_items = len(counts)
-        self.round_cnt = 0
+        self.n = len(counts)
+        self.total_val = sum(c * v for c, v in zip(counts, values))
         
-        # Opponent modeling: Track accumulated kept amount by opponent to infer preference
-        self.opp_kept_sum = [0] * self.num_items
-        self.opp_offers_count = 0
+        # Round state tracking
+        self.round_idx = 0 
+        
+        # Opponent modeling: Frequency of items opponent kept for themselves
+        # Used to infer their valuation
+        self.opp_demands = [0] * self.n
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        # --- 1. Round Tracking ---
+        # --- 1. Round & State Update ---
         if o is None:
-            # P1 starts the game (Round 1)
-            self.round_cnt = 1
+            # I am P1 starting the game (Round 1, Turn 1)
+            self.round_idx = 1
         else:
-            if self.me == 0:
-                # P1 receives counter from P2 -> New Round
-                self.round_cnt += 1
-            else:
-                # P2 receives offer from P1 -> Update Round
-                if self.round_cnt == 0:
-                    self.round_cnt = 1
-                else:
-                    self.round_cnt += 1
-
-        # --- 2. Update Opponent Model ---
-        offer_val_me = 0
-        if o is not None:
-            offer_val_me = sum(o[i] * self.values[i] for i in range(self.num_items))
-            # Opponent offered 'o' to me, meaning they kept 'counts - o'
-            self.opp_offers_count += 1
-            for i in range(self.num_items):
+            # Analyze opponent's offer to infer their preferences
+            # 'o' is what they offer ME. Thus they kept `counts - o`.
+            for i in range(self.n):
                 kept = self.counts[i] - o[i]
                 if kept > 0:
-                    self.opp_kept_sum[i] += kept
+                    self.opp_demands[i] += kept
+            
+            # Increment Round Counter logic
+            if self.me == 0:
+                # I am P1. I made an offer, Opp countered. Now it's the next round.
+                self.round_idx += 1
+            else:
+                # I am P2. Opp made an offer. 
+                # If first time called, it is Round 1. Otherwise increment.
+                if self.round_idx == 0:
+                    self.round_idx = 1
+                else:
+                    self.round_idx += 1
 
-        # --- 3. Acceptance Logic ---
+        # Calculate the value of the offer to me
+        val_me = 0
         if o is not None:
-            # A. Optimal or near-optimal deal
-            if offer_val_me >= self.total_value:
-                return None
+            val_me = sum(o[i] * self.values[i] for i in range(self.n))
+
+        # --- 2. Acceptance Decisions ---
+        if o is not None:
+            # A. P2 Forced Acceptance in Last Round (Ultimatum Response)
+            # If I (P2) reject in the last turn, the game ends and I get 0.
+            # Rational move is to accept provided the result isn't worse than 0.
+            if self.me == 1 and self.round_idx == self.max_rounds:
+                return None 
             
-            # B. P2 Last Turn Check (Rationality)
-            # If I (P2) reject in the very last round, the game ends with 0 for both.
-            # Accept anything > 0.
-            if self.me == 1 and self.round_cnt == self.max_rounds:
-                if offer_val_me > 0:
+            # B. P1 Pre-Ultimatum Logic (Round N, Turn 1)
+            # I have the "Last Mover" advantage in the next turn (Ultimatum).
+            # Only accept if the offer is near-perfect/better than what I expect from an ultimatum.
+            if self.me == 0 and self.round_idx == self.max_rounds:
+                if val_me >= int(self.total_val * 0.98):
                     return None
             
-            # C. P1 Pre-Ultimatum Check
-            # If I (P1) reject in the final round, I make an Ultimatum.
-            # I should only accept the current offer if it matches or beats my expected Ultimatum return.
-            if self.me == 0 and self.round_cnt == self.max_rounds:
-                my_ultimatum = self._make_ultimatum()
-                my_ultimatum_val = sum(my_ultimatum[i] * self.values[i] for i in range(self.num_items))
-                if offer_val_me >= my_ultimatum_val:
-                    return None
-                
-            # D. Dynamic Concession Curve
-            # Normalized progress 0.0 -> 1.0 throughout the rounds
-            progress = (self.round_cnt - 1) / max(1, self.max_rounds - 1)
+            # C. Standard Rounds Acceptance
+            # Check if offer meets the dynamic threshold
+            threshold_frac = self._get_threshold(self.round_idx)
+            if val_me >= int(self.total_val * threshold_frac):
+                return None
             
-            thresh_start = 1.0
-            thresh_end = 0.65 
-            
-            # If P2 is approaching the Ultimatum round, lower threshold to secure a deal
-            if self.me == 1 and self.round_cnt >= self.max_rounds - 1:
-                thresh_end = 0.55
-                
-            threshold = thresh_start - (thresh_start - thresh_end) * (progress ** 2)
-            
-            if offer_val_me >= int(threshold * self.total_value):
+            # Always accept max possible value
+            if val_me == self.total_val:
                 return None
 
-        # --- 4. Counter-Offer Generation ---
+        # --- 3. Counter-Offer Generation ---
         
-        # A. P1 Ultimatum (Last Move)
-        if self.me == 0 and self.round_cnt == self.max_rounds:
-            return self._make_ultimatum()
+        # A. P1 Ultimatum (Last Round)
+        # Offer bare minimum to opponent to secure deal -> maximize own profit.
+        if self.me == 0 and self.round_idx == self.max_rounds:
+            return self._build_ultimatum()
+            
+        # B. P2 Penultimate Round Strategy (Pre-empting Ultimatum)
+        # I need to offer P1 something good enough (fair-ish) so they don't crush me next turn.
+        # Aiming for ~60% ensures decent profit while reducing risk.
+        if self.me == 1 and self.round_idx == self.max_rounds - 1:
+            return self._build_greedy_offer(target_frac=0.60)
+            
+        # C. Standard Negotiation
+        # Ask for slightly more than threshold to allow haggling room.
+        target_frac = self._get_threshold(self.round_idx) * 1.05
+        # Clamp between 20% and 100%
+        target_frac = min(1.0, max(0.2, target_frac))
+        
+        return self._build_greedy_offer(target_frac)
 
-        # B. Standard Offer Generation
-        progress = (self.round_cnt - 1) / max(1, self.max_rounds - 1)
-        target_start = 1.0
-        target_end = 0.70
-        
-        # P2 Penultimate Round: Offer a tempting 50/50 split to avoid P1's Ultimatum
-        if self.me == 1 and self.round_cnt == self.max_rounds - 1:
-            target_frac = 0.50
-        else:
-            target_frac = target_start - (target_start - target_end) * (progress ** 1.5)
-            
-        target_val = int(target_frac * self.total_value)
-        return self._build_greedy_offer(target_val)
+    def _get_threshold(self, r: int) -> float:
+        # Linear decay pattern of expectations from 1.0 down to ~0.65
+        if self.max_rounds <= 1:
+            return 0.6
+        progress = (r - 1) / (self.max_rounds - 1)
+        start, end = 1.0, 0.65
+        return start - (start - end) * progress
 
-    def _make_ultimatum(self) -> list[int]:
-        # Strategy: Keep everything, but give opponent 1 item they seem to value most.
-        # This entices a rational opponent to accept (>0) while maximizing my profit.
-        best_item = -1
-        max_score = -float('inf')
+    def _build_greedy_offer(self, target_frac: float) -> list[int]:
+        # Construct an offer that gives me roughly `target_val` 
+        # while keeping items I prefer (Ratio: MyValue / OppInterest)
         
-        indices = list(range(self.num_items))
-        random.shuffle(indices) # Break ties randomly
-        
-        for i in indices:
-            if self.counts[i] > 0:
-                # Heuristic: maximize Opponent Interest (history) - MyCost (value)
-                score = self.opp_kept_sum[i] * 1000 - self.values[i]
-                if score > max_score:
-                    max_score = score
-                    best_item = i
-        
-        proposal = list(self.counts)
-        if best_item != -1:
-            proposal[best_item] -= 1
-            
-        return proposal
-
-    def _build_greedy_offer(self, target_val: int) -> list[int]:
-        # Sort items by Efficiency: MyValue / OpponentInterest
-        candidates = []
-        for i in range(self.num_items):
-            if self.counts[i] == 0: continue
-            
-            opp_interest = self.opp_kept_sum[i] + 0.1
-            ratio = self.values[i] / opp_interest
-            # Add small noise to avoid deterministic loops
-            ratio *= random.uniform(0.98, 1.02)
-            candidates.append((ratio, i))
-            
-        # Highest efficiency first
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        
-        proposal = [0] * self.num_items
+        target_val = int(self.total_val * target_frac)
+        proposal = [0] * self.n
         current_val = 0
         
-        for _, idx in candidates:
-            if current_val >= target_val:
-                break
-                
-            total_available = self.counts[idx]
+        priorities = []
+        for i in range(self.n):
+            if self.counts[i] == 0: 
+                continue
             
-            # If I value the item, take as many as needed to reach target
-            if self.values[idx] > 0:
-                needed = target_val - current_val
-                # Ceiling division for integer count
-                count_needed = (needed + self.values[idx] - 1) // self.values[idx]
-                take = min(total_available, count_needed)
+            # Opponent interest metric (smoothed)
+            opp_interest = 1.0 + self.opp_demands[i]
+            
+            # If my value is 0, efficient to give it away (priority = 0)
+            if self.values[i] == 0:
+                prio = 0.0
             else:
-                # If I don't value it, don't take it (effectively giving it to opponent)
-                take = 0
+                prio = self.values[i] / opp_interest
+                
+            # Add small noise to prevent deterministic loops
+            prio *= random.uniform(0.98, 1.02)
+            priorities.append((prio, i))
+            
+        # Sort descending (We want to KEEP high priority items)
+        priorities.sort(key=lambda x: x[0], reverse=True)
+        
+        # Fill knapsack
+        for _, idx in priorities:
+            if self.values[idx] == 0: continue # Don't take trash
+            
+            count = self.counts[idx]
+            needed = target_val - current_val
+            
+            if needed <= 0: break
+            
+            # Calculate how many to take
+            take = (needed + self.values[idx] - 1) // self.values[idx]
+            take = min(take, count)
             
             proposal[idx] += take
             current_val += take * self.values[idx]
+            
+        return proposal
+
+    def _build_ultimatum(self) -> list[int]:
+        # Strategy: Keep everything, but give opponent 1 item they seem to value most.
+        # This capitalizes on Last Mover Advantage for P1.
+        proposal = list(self.counts)
+        
+        # Evaluate which item is best to give up (Cost-Benefit Analysis)
+        # Metric: Maximize (OpponentGain / MyLoss)
+        # OpponentGain is estimated via demand history.
+        candidates = []
+        for i in range(self.n):
+            if self.counts[i] > 0:
+                opp_gain = self.opp_demands[i] + 0.1
+                my_loss = self.values[i] + 0.01
+                
+                efficiency = opp_gain / my_loss
+                efficiency *= random.uniform(0.99, 1.01)
+                candidates.append((efficiency, i))
+        
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        
+        # Give 1 unit of the best candidate to the opponent
+        if candidates:
+            best_give_idx = candidates[0][1]
+            proposal[best_give_idx] -= 1
             
         return proposal

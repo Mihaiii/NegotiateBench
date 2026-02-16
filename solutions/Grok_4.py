@@ -102,7 +102,7 @@ class Agent:
                         m[best] += num
                         current_util += num * v_partner[best]
                     else:
-                        candidates.sort(key=lambda i: (-v_partner[i] / self.values[i] if self.values[i] > 0 else 0, -self.values[i]))
+                        candidates.sort(key=lambda i: (-v_partner[i] / self.values[i] if self.values[i] > 0 else 0, self.values[i]))
                         for i in candidates:
                             util_per = v_partner[i]
                             max_give = self.counts[i] - m[i]

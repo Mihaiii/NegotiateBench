@@ -13,38 +13,61 @@ class Agent:
         )
         self.turn_count = 0
         self.last_offer = None
+        self.partner_offers = []
 
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn_count += 1
         
+        # Calculate actual turn number in the negotiation
+        if self.me == 0:
+            actual_turn = 2 * (self.turn_count - 1) + 1
+        else:
+            actual_turn = 2 * self.turn_count
+        
         # Handle acceptance if we received an offer
         if o is not None:
+            self.partner_offers.append(o.copy())
             offer_value = sum(oi * vi for oi, vi in zip(o, self.values))
             
             # Accept immediately if we value nothing
             if self.my_total == 0:
                 return None
             
-            # Calculate acceptance threshold: linear decrease from 80% to 0%
+            # Calculate base threshold: linear decrease from 90% to 0%
             if self.total_turns == 1:
                 fraction = 1.0
             else:
-                fraction = (self.turn_count - 1) / (self.total_turns - 1)
-            threshold = self.my_total * (0.8 - 0.8 * fraction)
+                fraction = (actual_turn - 1) / (self.total_turns - 1)
+            threshold = self.my_total * (0.9 - 0.9 * fraction)
             
-            # Accept any offer on the last turn (since rejection gives 0)
-            if self.turn_count == self.total_turns:
+            # Adjust threshold based on partner's concessions
+            if len(self.partner_offers) >= 2:
+                prev_offer = self.partner_offers[-2]
+                curr_offer = self.partner_offers[-1]
+                prev_value = sum(oi * vi for oi, vi in zip(prev_offer, self.values))
+                curr_value = sum(oi * vi for oi, vi in zip(curr_offer, self.values))
+                # Lower threshold if partner made a better offer to us
+                if curr_value > prev_value:
+                    threshold = max(0, threshold - 0.1 * self.my_total)
+            
+            # Accept any non-negative offer on the last turn
+            if actual_turn == self.total_turns:
                 threshold = -1
+            
+            # Ensure threshold is not negative except for last turn
+            if actual_turn != self.total_turns:
+                threshold = max(0, threshold)
             
             if offer_value >= threshold:
                 return None
         
         # Generate our counter-offer
-        # Calculate target value for our offer: linear decrease from 90% to 50%
+        # Calculate target value: linear decrease from 100% to 40%
         if self.total_turns == 1:
             offer_fraction = 0.5
         else:
-            offer_fraction = 0.9 - 0.4 * (self.turn_count - 1) / (self.total_turns - 1)
+            progress = (actual_turn - 1) / (self.total_turns - 1)
+            offer_fraction = 1.0 - 0.6 * progress  # 100% -> 40%
         offer_target = max(0, min(offer_fraction * self.my_total, self.my_total))
         
         # Start with maximum value split (take all valuable items)
@@ -68,7 +91,7 @@ class Agent:
                     current_value -= max_possible * val
                     need_to_give -= max_possible * val
                 
-                # Give one more if still needed (even if it goes slightly under target)
+                # Give one more if still needed (even if slightly under target)
                 if need_to_give > 0 and my_split[idx] > 0:
                     my_split[idx] -= 1
                     current_value -= val

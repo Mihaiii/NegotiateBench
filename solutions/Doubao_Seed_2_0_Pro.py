@@ -6,52 +6,48 @@ class Agent:
         self.max_rounds = max_rounds
         self.total_value = sum(c * v for c, v in zip(counts, values))
         self.total_offers = 2 * max_rounds
-        self.last_offerer = 1  # Total offers always even, so agent 1 makes last offer
+        self.last_offerer = 1  # Even total offers means agent 1 makes last offer
         self.offers_made = 0
         self.opponent_offers = []
-        # Sort items by our value descending to prioritize highest value items
-        self.sorted_items = sorted(range(len(counts)), key=lambda x: (-values[x], counts[x]))
+        # Sort items by our value descending to prioritize highest value items first
+        self.sorted_items = sorted(range(len(counts)), key=lambda x: (-values[x], -counts[x]))
 
     def offer(self, o: list[int] | None) -> list[int] | None:
-        # Edge case: all items are worthless to us
+        # Edge case: all items are worthless to us, accept immediately
         if self.total_value == 0:
             return None if o is not None else [0] * len(self.counts)
 
-        # Process incoming offer if present
+        # Process incoming opponent offer
         if o is not None:
             self.offers_made += 1
             self.opponent_offers.append(o)
             
+            # Calculate offer value to us
+            offer_val = sum(int(o[i]) * self.values[i] for i in range(len(o)))
             # Validate offer
-            valid = True
-            offer_val = 0
-            for i in range(len(o)):
-                count = int(o[i])
-                if count < 0 or count > self.counts[i]:
-                    valid = False
-                    break
-                offer_val += count * self.values[i]
+            valid = all(0 <= int(o[i]) <= self.counts[i] for i in range(len(o)))
             
             if valid:
                 offers_left = self.total_offers - self.offers_made
-                # No more offers left if we reject, accept anything >= 0
+                # If no offers left after rejecting, accept any positive value
                 if offers_left <= 0:
-                    return None
+                    return None if offer_val >= 0 else []
                 
-                # Calculate minimum acceptable value
+                # Calculate minimum acceptable value (never below 40% unless last turn)
                 progress = self.offers_made / max(1, self.total_offers - 1)
                 if self.me == self.last_offerer:
-                    # We have final say, hold out for higher value longer
-                    min_accept = int(max(0.2 * self.total_value, self.total_value * (0.85 - 0.6 * progress)))
+                    # We have final say, hold out for higher value
+                    min_accept = max(0.4 * self.total_value, self.total_value * (0.7 - 0.2 * progress))
                 else:
-                    # Opponent has final say, be more flexible
-                    min_accept = int(max(0.1 * self.total_value, self.total_value * (0.75 - 0.65 * progress)))
+                    # Opponent has final say, slightly more flexible
+                    min_accept = max(0.35 * self.total_value, self.total_value * (0.65 - 0.25 * progress))
                 
-                if offer_val >= min_accept:
+                # Accept if offer is good enough
+                if offer_val >= min_accept or offer_val >= 0.5 * self.total_value:
                     return None
 
         offers_left_after = self.total_offers - (self.offers_made + 1)
-        # Final offer if we are last offerer, take all valuable items (opponent will accept)
+        # Final offer: take all valuable items, opponent will accept rather than get 0
         if offers_left_after <= 0 and self.me == self.last_offerer:
             my_offer = [0] * len(self.counts)
             for i in range(len(self.counts)):
@@ -62,9 +58,9 @@ class Agent:
         # Calculate desired value for our counter offer
         progress = self.offers_made / max(1, self.total_offers - 1)
         if self.me == self.last_offerer:
-            desired_val = int(min(self.total_value, max(0.3 * self.total_value, self.total_value * (0.95 - 0.6 * progress))))
+            desired_val = min(self.total_value, max(0.5 * self.total_value, self.total_value * (0.95 - 0.4 * progress)))
         else:
-            desired_val = int(min(self.total_value, max(0.15 * self.total_value, self.total_value * (0.9 - 0.7 * progress))))
+            desired_val = min(self.total_value, max(0.45 * self.total_value, self.total_value * (0.9 - 0.45 * progress)))
 
         # Build offer by taking highest value items first
         my_offer = [0] * len(self.counts)
@@ -73,10 +69,6 @@ class Agent:
             if current_val >= desired_val or self.values[idx] == 0:
                 continue
             max_possible = self.counts[idx]
-            # Don't ask for way more than opponent has offered before
-            if self.opponent_offers:
-                max_opponent = max(int(offer[idx]) for offer in self.opponent_offers)
-                max_possible = min(max_possible, max_opponent + 1)
             take = min(max_possible, (desired_val - current_val) // self.values[idx])
             my_offer[idx] = take
             current_val += take * self.values[idx]
@@ -87,9 +79,6 @@ class Agent:
                 if self.values[idx] == 0:
                     continue
                 remaining = self.counts[idx] - my_offer[idx]
-                if self.opponent_offers:
-                    max_opponent = max(int(offer[idx]) for offer in self.opponent_offers)
-                    remaining = min(remaining, max_opponent + 1 - my_offer[idx])
                 if remaining > 0:
                     take = min(remaining, 1)
                     my_offer[idx] += take
@@ -97,12 +86,25 @@ class Agent:
                     if current_val >= desired_val:
                         break
 
-        # Handle zero value items: keep initially, gradually give away as negotiations progress
-        give_ratio = progress
-        for i in range(len(self.counts)):
-            if self.values[i] == 0:
-                give = int(self.counts[i] * give_ratio)
-                my_offer[i] = self.counts[i] - give
+        # Concede low/zero value items first (bargaining chips)
+        # Prioritize giving away items opponent seems to value (from their offers)
+        if self.opponent_offers:
+            # Calculate opponent preference: lower average offer = they value item more
+            opponent_pref = []
+            for i in range(len(self.counts)):
+                avg_offer = sum(offer[i] for offer in self.opponent_offers) / len(self.opponent_offers)
+                opponent_pref.append((-avg_offer, i))  # Negative for ascending sort
+            opponent_pref.sort()
+            # Give away items we don't value first, that opponent wants most
+            for _, i in opponent_pref:
+                if self.values[i] == 0:
+                    give = int(self.counts[i] * min(progress + 0.2, 1.0))
+                    my_offer[i] = self.counts[i] - give
+        else:
+            # First offer: keep all zero value items as bargaining chips
+            for i in range(len(self.counts)):
+                if self.values[i] == 0:
+                    my_offer[i] = self.counts[i]
 
         # Ensure all values are valid integers within bounds
         for i in range(len(my_offer)):

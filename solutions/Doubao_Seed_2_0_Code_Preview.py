@@ -41,18 +41,16 @@ class Agent:
             if self.my_total == 0 or offer_value >= self.my_total:
                 return None
             
-            # Calculate acceptance threshold
+            # Calculate acceptance threshold: linear from 90% to 50% except last turn
             remaining_turns = self.total_turns - actual_turn
-            if self.total_turns == 1:
-                fraction_remaining = 1.0
-            else:
-                fraction_remaining = remaining_turns / (self.total_turns - 1)
-            
-            # Threshold: 95% -> 50% except last turn
             if actual_turn == self.total_turns:
                 threshold = -1  # Accept anything (even 0) on last turn
             else:
-                threshold = self.my_total * (0.95 * fraction_remaining + 0.5 * (1 - fraction_remaining))
+                if self.total_turns == 1:
+                    progress = 0.0
+                else:
+                    progress = (actual_turn - 1) / (self.total_turns - 1)
+                threshold = self.my_total * (0.9 - 0.4 * progress)
             
             # Slight threshold reduction if partner is improving their offer
             if len(self.partner_offer_values) >= 2:
@@ -70,16 +68,16 @@ class Agent:
         else:
             progress = (actual_turn - 1) / (self.total_turns - 1)
         
-        # Base fraction: 100% -> 60% over time
-        offer_fraction = 1.0 - 0.4 * progress
+        # Base fraction: 100% -> 55% over time
+        offer_fraction = 1.0 - 0.45 * progress
         
         # Slow down concession if partner isn't improving
         if len(self.partner_offer_values) >= 2:
             if self.partner_offer_values[-1] <= self.partner_offer_values[-2]:
-                # Only concede 2% max from our last offer
+                # Only concede 1.5% max from our last offer
                 if self.my_offer_values:
                     last_fraction = self.my_offer_values[-1] / self.my_total if self.my_total > 0 else 1.0
-                    offer_fraction = max(offer_fraction, last_fraction - 0.02)
+                    offer_fraction = max(offer_fraction, last_fraction - 0.015)
         
         # Ensure minimum 50% except for last 2 turns
         remaining_turns = self.total_turns - actual_turn

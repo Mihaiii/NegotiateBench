@@ -5,67 +5,66 @@ class Agent:
         self.values = values
         self.max_rounds = max_rounds
         self.total = sum(c * v for c, v in zip(counts, values))
-        
-        # Track round number (each round has 2 turns - partner then us)
-        self.round_num = 1
-        self.received_first_offer = False
+        self.turn = 0
         
     def _value(self, alloc: list[int]) -> int:
-        """Compute my value for an allocation."""
         return sum(a * v for a, v in zip(alloc, self.values))
     
+    def _partner_value(self, my_offer: list[int]) -> int:
+        """Estimate partner's value for what we're offering them."""
+        # Partner gets whatever is not in our offer
+        partner_alloc = [c - m for c, m in zip(self.counts, my_offer)]
+        # Without knowing their values, assume uniform value distribution
+        # This is a heuristic - we'll use a simple assumption
+        return sum(partner_alloc)  # Raw count as proxy
+    
     def _make_offer(self, target_pct: float) -> list[int]:
-        """Create an offer targeting a specific percentage of total value."""
-        offer = self.counts.copy()
+        """Create an offer asking for target_pct of total value."""
         target = self.total * target_pct
+        offer = [0] * len(self.counts)
+        remaining = self.counts.copy()
         
-        # Remove lowest-value items first to maximize what we keep
-        while self._value(offer) > target and sum(offer) > 0:
-            # Find item with lowest value per unit that we have > 0
-            best_idx = -1
-            best_value = float('inf')
-            for i in range(len(offer)):
-                if offer[i] > 0 and self.values[i] < best_value:
-                    best_value = self.values[i]
-                    best_idx = i
-            
-            if best_idx >= 0:
-                offer[best_idx] -= 1
-            else:
-                break
+        # Greedily take highest-value items first
+        indices = sorted(range(len(self.values)), key=lambda i: -self.values[i])
         
-        # Ensure we don't ask for nothing if we can get something
-        if self._value(offer) == 0 and sum(self.counts) > 0:
-            best_idx = max(range(len(self.values)), key=lambda i: self.values[i])
-            if self.values[best_idx] > 0:
-                offer[best_idx] = min(1, self.counts[best_idx])
+        for idx in indices:
+            while remaining[idx] > 0 and self._value(offer) + self.values[idx] <= target:
+                offer[idx] += 1
+                remaining[idx] -= 1
+        
+        # If we got nothing, at least get one valuable item
+        if self._value(offer) == 0:
+            for idx in indices:
+                if self.counts[idx] > 0 and self.values[idx] > 0:
+                    offer[idx] = min(1, self.counts[idx])
+                    break
         
         return offer
     
     def offer(self, o: list[int] | None) -> list[int] | None:
-        # First turn: o is None
-        if o is None:
-            # Opening offer: aim for ~45% and gradually reduce
-            # More aggressive opening to get better deals
-            progress = min(1.0, (self.round_num - 1) / max(1, self.max_rounds - 1))
-            target = 0.45 - progress * 0.20
-            return self._make_offer(target)
+        self.turn += 1
         
-        # Received an offer - check if we should accept
+        # Calculate progress through negotiation (0 to 1)
+        total_turns = self.max_rounds * 2
+        progress = self.turn / total_turns
+        
+        # First turn - make opening offer
+        if o is None:
+            # Open with 40% target, slightly higher to have room to concede
+            return self._make_offer(0.40)
+        
+        # Received an offer - evaluate it
         offer_value = self._value(o)
         
-        # Calculate acceptable threshold - starts high and decreases
-        progress = min(1.0, (self.round_num - 1) / max(1, self.max_rounds - 1))
-        min_accept_pct = 0.40 - progress * 0.25
+        # Minimum we accept starts at 35% and decreases to 25% as time runs out
+        min_accept_pct = 0.35 - progress * 0.12
         min_accept = self.total * min_accept_pct
         
         # Accept if offer is good enough
         if offer_value >= min_accept:
-            return None  # Accept the offer
+            return None
         
-        # Make counter-offer and advance round
-        self.round_num += 1
-        
-        # Our target for counter-offers - slightly more than what we'd accept
-        target_pct = min_accept_pct + 0.08
+        # Otherwise make counter-offer
+        # Counter-offer targets slightly above what we'd accept + some buffer
+        target_pct = min_accept_pct + 0.05 + progress * 0.05
         return self._make_offer(target_pct)

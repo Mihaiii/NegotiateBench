@@ -10,7 +10,7 @@ class Agent:
         self.max_turns = 2 * max_rounds
         self.my_turn_number = 0
         self.partner_offers = []
-        self.has_advantage = (self.max_turns % 2 == 0 and self.me == 0) or (self.max_turns % 2 == 1 and self.me == 1)
+        self.has_advantage = (self.max_turns % 2 == 0 and self.me == 1) or (self.max_turns % 2 == 1 and self.me == 0)
 
     def value(self, o: list[int]) -> float:
         return sum(o[i] * self.values[i] for i in range(self.n_types))
@@ -66,9 +66,9 @@ class Agent:
             partner_threshold = 0.0001
         else:
             if self.has_advantage:
-                my_share_frac = 0.9 - 0.4 * g
+                my_share_frac = 0.9 - 0.6 * g
             else:
-                my_share_frac = 0.7 - 0.3 * g
+                my_share_frac = 0.7 - 0.4 * g
             min_accept = self.total * my_share_frac
             partner_threshold = self.total * (1 - my_share_frac)
         if o is not None:

@@ -15,6 +15,7 @@ class Agent:
         self.previous_my_offers = set()
         self.partner_offer_values = []
         self.my_offer_values = []
+        self.best_offer_received = 0  # Track the best offer we've gotten from partner
 
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn_count += 1
@@ -33,6 +34,7 @@ class Agent:
             return [0] * len(self.counts)
         
         # Process incoming offer
+        current_offer_value = 0
         if o is not None:
             # Validate offer
             valid = True
@@ -43,41 +45,50 @@ class Agent:
             if valid:
                 current_offer_value = sum(oi * vi for oi, vi in zip(o, self.values))
                 self.partner_offer_values.append(current_offer_value)
+                # Update best offer received
+                if current_offer_value > self.best_offer_received:
+                    self.best_offer_received = current_offer_value
                 
                 # Acceptance checks
                 if current_offer_value >= self.my_total:
                     return None  # Accept if we get everything
                 
                 if actual_turn == self.total_turns:
-                    # Accept only if better than nothing
+                    # Accept only if better than nothing (last turn, reject = 0)
                     if current_offer_value > 0:
                         return None
-                    else:
-                        # Reject, since same as nothing
-                        pass
                 else:
                     # Calculate threshold
                     progress = (actual_turn - 1) / (self.total_turns - 1) if self.total_turns > 1 else 0.0
-                    base_threshold = self.my_total * (0.9 - 0.4 * progress)
+                    base_threshold = self.my_total * (0.95 - 0.4 * progress)  # 95% to 55%
                     threshold = base_threshold
                     
                     # Adjust threshold based on partner behavior
                     if len(self.partner_offer_values) >= 2:
-                        if self.partner_offer_values[-1] > self.partner_offer_values[-2]:
+                        prev_offer = self.partner_offer_values[-2]
+                        curr_offer = self.partner_offer_values[-1]
+                        if curr_offer > prev_offer:
                             # Partner is improving, lower threshold slightly
-                            threshold = max(0.5 * self.my_total, threshold - 0.05 * self.my_total)
-                        elif self.partner_offer_values[-1] <= self.partner_offer_values[-2]:
-                            # Partner is not improving, keep threshold higher
-                            threshold = min(threshold + 0.05 * self.my_total, 0.95 * self.my_total)
+                            threshold = max(0.5 * self.my_total, threshold - 0.03 * self.my_total)
+                        elif curr_offer < prev_offer:
+                            # Partner is making worse offers, raise threshold a bit
+                            threshold = min(threshold + 0.03 * self.my_total, 0.95 * self.my_total)
+                        # If same offer, keep threshold as is
                     
                     # Ensure minimum threshold when there are enough turns left
-                    if remaining_turns > 2:
+                    if remaining_turns > 4:
+                        threshold = max(threshold, 0.55 * self.my_total)
+                    elif remaining_turns > 2:
                         threshold = max(threshold, 0.5 * self.my_total)
                     
                     # Clamp threshold to valid range
                     threshold = max(0.0, min(threshold, self.my_total))
                     
+                    # Accept if current offer is good enough
                     if current_offer_value >= threshold:
+                        return None
+                    # Also accept if this is the best offer we've seen and it's above 50%
+                    if current_offer_value == self.best_offer_received and current_offer_value >= 0.5 * self.my_total and remaining_turns <= 4:
                         return None
         
         # Generate counter-offer
@@ -85,17 +96,29 @@ class Agent:
         target_fraction = 1.0 - 0.4 * progress  # Gradually reduce from 100% to 60%
         
         # Adjust target based on partner behavior
+        partner_improved = False
         if len(self.partner_offer_values) >= 2:
-            if self.partner_offer_values[-1] <= self.partner_offer_values[-2]:
-                # Partner not improving, hold ground
-                if self.my_offer_values:
-                    last_my_fraction = self.my_offer_values[-1] / self.my_total
-                    target_fraction = max(target_fraction, last_my_fraction - 0.02)
+            if self.partner_offer_values[-1] > self.partner_offer_values[-2]:
+                partner_improved = True
+        
+        if not partner_improved and self.my_offer_values:
+            # Partner not improving, hold ground (don't go below last offer)
+            last_my_fraction = self.my_offer_values[-1] / self.my_total
+            target_fraction = max(target_fraction, last_my_fraction)
         
         # Ensure minimum target fraction
-        min_fraction = 0.5 if remaining_turns > 2 else 0.3
+        if remaining_turns > 4:
+            min_fraction = 0.6
+        elif remaining_turns > 2:
+            min_fraction = 0.55
+        else:
+            min_fraction = 0.45
         target_fraction = max(target_fraction, min_fraction)
         target_fraction = min(target_fraction, 1.0)
+        
+        # Also, don't target less than the best offer we've received (if it's decent)
+        if self.best_offer_received >= 0.4 * self.my_total:
+            target_fraction = max(target_fraction, self.best_offer_received / self.my_total)
         
         target_value = target_fraction * self.my_total
         target_value = max(0, min(target_value, self.my_total))
@@ -117,12 +140,13 @@ class Agent:
                 if max_give > 0:
                     my_split[idx] -= max_give
                     current_value -= max_give * val
-            # If still above target, give up one more if possible
+            # If still above target, give up one more if possible (but not below min)
             if current_value > target_value and self.sorted_items:
+                min_acceptable = 0.4 * self.my_total if remaining_turns <= 2 else 0.5 * self.my_total
                 for val, idx in self.sorted_items:
                     if my_split[idx] > 0:
                         new_val = current_value - val
-                        if new_val >= 0.3 * self.my_total or remaining_turns <= 2:
+                        if new_val >= min_acceptable:
                             my_split[idx] -= 1
                             current_value = new_val
                             break
@@ -178,16 +202,29 @@ class Agent:
                 if modified:
                     split_tuple = tuple(my_split)
                 else:
-                    # If no swap, give up one least valuable if possible
-                    if self.sorted_items:
-                        for val, idx in self.sorted_items:
-                            if my_split[idx] > 0:
-                                new_value = current_value - val
-                                if remaining_turns <= 2 or new_value >= 0.3 * self.my_total:
-                                    my_split[idx] -= 1
-                                    current_value = new_value
-                                    split_tuple = tuple(my_split)
-                                    break
+                    # If no swap, try to take one more least valuable if possible, else give up one
+                    # First try to take an item we gave up (if any)
+                    found = False
+                    for val, idx in reversed(self.sorted_items):
+                        if my_split[idx] < self.counts[idx] and self.values[idx] > 0:
+                            my_split[idx] += 1
+                            current_value += val
+                            found = True
+                            break
+                    if found:
+                        split_tuple = tuple(my_split)
+                    else:
+                        # Give up one least valuable if possible
+                        if self.sorted_items:
+                            min_acceptable = 0.4 * self.my_total if remaining_turns <= 2 else 0.5 * self.my_total
+                            for val, idx in self.sorted_items:
+                                if my_split[idx] > 0:
+                                    new_val = current_value - val
+                                    if new_val >= min_acceptable:
+                                        my_split[idx] -= 1
+                                        current_value = new_val
+                                        split_tuple = tuple(my_split)
+                                        break
         
         # Ensure valid split
         my_split = [int(x) for x in my_split]

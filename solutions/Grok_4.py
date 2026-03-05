@@ -25,7 +25,7 @@ class Agent:
         num_off = len(self.partner_offers)
         avg_taken = [0.0] * self.n_types
         sum_weights = 0.0
-        alpha = 0.5
+        alpha = 0.3
         for k in range(num_off):
             weight = alpha ** (num_off - 1 - k)
             o = self.partner_offers[k]
@@ -56,19 +56,19 @@ class Agent:
         is_penultimate = current_turn == self.max_turns - 1
         progress = current_turn / self.max_turns if self.max_turns > 0 else 1.0
         v_partner = self.estimate_v_partner()
-        power = 3
+        power = 2
         g = progress ** power
         if is_last_turn:
             min_accept = 0.0001
             partner_threshold = 0
         elif is_penultimate:
-            min_accept = self.total * 0.5
+            min_accept = self.total * 0.3
             partner_threshold = 0.0001
         else:
             if self.has_advantage:
-                my_share_frac = 0.9 - 0.6 * g
+                my_share_frac = 0.95 - 0.7 * g
             else:
-                my_share_frac = 0.7 - 0.4 * g
+                my_share_frac = 0.8 - 0.55 * g
             min_accept = self.total * my_share_frac
             partner_threshold = self.total * (1 - my_share_frac)
         if o is not None:
@@ -111,9 +111,8 @@ class Agent:
                             best = candidates[0]
                         num = 1
                         m[best] += num
-                        added = num * v_partner[best]
-                        current_util += added
-                        remaining_needed -= added
+                        current_util += num * v_partner[best]
+                        remaining_needed -= num * v_partner[best]
                     else:
                         candidates.sort(key=lambda i: (-v_partner[i] / self.values[i] if self.values[i] > 0 else 0, self.values[i]))
                         for i in candidates:
@@ -127,16 +126,18 @@ class Agent:
                             remaining_needed -= added
                             if remaining_needed <= 0:
                                 break
-            elif remaining_needed < 0:
+            # Adjust for overgiving
+            if remaining_needed < 0:
                 excess = -remaining_needed
                 while excess > 0:
-                    candidates = [i for i in range(self.n_types) if self.values[i] == 0 and m[i] > 0 and v_partner[i] > 0 and v_partner[i] <= excess]
+                    candidates = [i for i in range(self.n_types) if m[i] > 0 and v_partner[i] <= excess]
                     if not candidates:
                         break
-                    best = max(candidates, key=lambda i: v_partner[i])
+                    best = max(candidates, key=lambda i: (self.values[i], -v_partner[i]))
                     m[best] -= 1
-                    current_util -= v_partner[best]
-                    excess -= v_partner[best]
+                    sub = v_partner[best]
+                    current_util -= sub
+                    excess -= sub
             # Add minimal if necessary
             if current_util <= 0 and partner_threshold > 0 and not is_last_turn:
                 candidates = [i for i in range(self.n_types) if v_partner[i] > 0 and self.values[i] > 0 and self.counts[i] - m[i] > 0]

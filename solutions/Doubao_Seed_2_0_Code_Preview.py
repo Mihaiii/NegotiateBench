@@ -6,16 +6,17 @@ class Agent:
         self.max_rounds = max_rounds
         self.total_turns = 2 * max_rounds
         self.my_total = sum(c * v for c, v in zip(counts, values))
-        # Sort items with positive value by ascending value (give up least valuable first)
+        
+        # Sort items by value ascending (least valuable first to give up)
         self.sorted_items = sorted(
-            [(v, i) for i, v in enumerate(values) if v > 0],
-            key=lambda x: (x[0], x[1])
+            [(v, i) for i, v in enumerate(values)],
+            key=lambda x: (x[0], x[1])  # sort by value, then index to break ties
         )
+        
         self.turn_count = 0
-        self.previous_my_offers = set()
-        self.partner_offer_values = []
-        self.my_offer_values = []
-        self.best_offer_received = 0  # Track the best offer we've gotten from partner
+        self.best_offer_received = 0  # Best value we've been offered
+        self.previous_offers = set()  # To avoid repeating our offers
+        self.last_offer_value = self.my_total  # Value of our last offer
 
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn_count += 1
@@ -36,211 +37,182 @@ class Agent:
         # Process incoming offer
         current_offer_value = 0
         if o is not None:
-            # Validate offer
+            # Validate offer first
             valid = True
             for i in range(len(o)):
                 if not isinstance(o[i], int) or o[i] < 0 or o[i] > self.counts[i]:
                     valid = False
                     break
+            
             if valid:
                 current_offer_value = sum(oi * vi for oi, vi in zip(o, self.values))
-                self.partner_offer_values.append(current_offer_value)
+                
                 # Update best offer received
                 if current_offer_value > self.best_offer_received:
                     self.best_offer_received = current_offer_value
                 
                 # Acceptance checks
+                # 1. If we get everything, accept immediately
                 if current_offer_value >= self.my_total:
-                    return None  # Accept if we get everything
+                    return None
                 
-                if actual_turn == self.total_turns:
-                    # Accept only if better than nothing (last turn, reject = 0)
-                    if current_offer_value > 0:
-                        return None
+                # Calculate dynamic threshold
+                # Start at 90%, decrease to 50% by the last turn
+                progress = (actual_turn - 1) / (self.total_turns - 1) if self.total_turns > 1 else 0.0
+                threshold = self.my_total * (0.9 - 0.4 * progress)
+                
+                # Never go below the best offer we've received (if it's decent)
+                if self.best_offer_received >= 0.4 * self.my_total:
+                    threshold = max(threshold, self.best_offer_received)
+                
+                # Minimum thresholds based on remaining turns
+                if remaining_turns > 4:
+                    threshold = max(threshold, 0.6 * self.my_total)
+                elif remaining_turns > 2:
+                    threshold = max(threshold, 0.55 * self.my_total)
                 else:
-                    # Calculate threshold
-                    progress = (actual_turn - 1) / (self.total_turns - 1) if self.total_turns > 1 else 0.0
-                    base_threshold = self.my_total * (0.95 - 0.4 * progress)  # 95% to 55%
-                    threshold = base_threshold
-                    
-                    # Adjust threshold based on partner behavior
-                    if len(self.partner_offer_values) >= 2:
-                        prev_offer = self.partner_offer_values[-2]
-                        curr_offer = self.partner_offer_values[-1]
-                        if curr_offer > prev_offer:
-                            # Partner is improving, lower threshold slightly
-                            threshold = max(0.5 * self.my_total, threshold - 0.03 * self.my_total)
-                        elif curr_offer < prev_offer:
-                            # Partner is making worse offers, raise threshold a bit
-                            threshold = min(threshold + 0.03 * self.my_total, 0.95 * self.my_total)
-                        # If same offer, keep threshold as is
-                    
-                    # Ensure minimum threshold when there are enough turns left
-                    if remaining_turns > 4:
-                        threshold = max(threshold, 0.55 * self.my_total)
-                    elif remaining_turns > 2:
-                        threshold = max(threshold, 0.5 * self.my_total)
-                    
-                    # Clamp threshold to valid range
-                    threshold = max(0.0, min(threshold, self.my_total))
-                    
-                    # Accept if current offer is good enough
-                    if current_offer_value >= threshold:
-                        return None
-                    # Also accept if this is the best offer we've seen and it's above 50%
-                    if current_offer_value == self.best_offer_received and current_offer_value >= 0.5 * self.my_total and remaining_turns <= 4:
-                        return None
+                    threshold = max(threshold, 0.45 * self.my_total)
+                
+                # On the last turn, make sure we at least get the best offer or 40%
+                if actual_turn == self.total_turns:
+                    threshold = max(self.best_offer_received, 0.4 * self.my_total)
+                
+                # Clamp threshold to valid range
+                threshold = max(0, min(threshold, self.my_total))
+                
+                # Accept if current offer meets or exceeds threshold
+                if current_offer_value >= threshold:
+                    return None
         
         # Generate counter-offer
+        # Calculate target value for ourselves
+        # Start at 95%, decrease to 60% by the end
         progress = (actual_turn - 1) / (self.total_turns - 1) if self.total_turns > 1 else 0.0
-        target_fraction = 1.0 - 0.4 * progress  # Gradually reduce from 100% to 60%
+        target_fraction = 0.95 - 0.35 * progress
         
-        # Adjust target based on partner behavior
-        partner_improved = False
-        if len(self.partner_offer_values) >= 2:
-            if self.partner_offer_values[-1] > self.partner_offer_values[-2]:
-                partner_improved = True
-        
-        if not partner_improved and self.my_offer_values:
-            # Partner not improving, hold ground (don't go below last offer)
-            last_my_fraction = self.my_offer_values[-1] / self.my_total
-            target_fraction = max(target_fraction, last_my_fraction)
-        
-        # Ensure minimum target fraction
-        if remaining_turns > 4:
-            min_fraction = 0.6
-        elif remaining_turns > 2:
-            min_fraction = 0.55
-        else:
-            min_fraction = 0.45
-        target_fraction = max(target_fraction, min_fraction)
-        target_fraction = min(target_fraction, 1.0)
-        
-        # Also, don't target less than the best offer we've received (if it's decent)
+        # Don't target less than the best offer we've received (if decent)
         if self.best_offer_received >= 0.4 * self.my_total:
             target_fraction = max(target_fraction, self.best_offer_received / self.my_total)
         
+        # Don't target less than our last offer (hold our ground)
+        if self.last_offer_value is not None:
+            target_fraction = max(target_fraction, self.last_offer_value / self.my_total)
+        
+        # Minimum target fractions
+        if remaining_turns > 4:
+            target_fraction = max(target_fraction, 0.7)
+        elif remaining_turns > 2:
+            target_fraction = max(target_fraction, 0.6)
+        else:
+            target_fraction = max(target_fraction, 0.5)
+        
+        target_fraction = min(target_fraction, 1.0)
         target_value = target_fraction * self.my_total
         target_value = max(0, min(target_value, self.my_total))
         
-        # Generate split: start with all positive value items
-        my_split = [self.counts[i] if self.values[i] > 0 else 0 for i in range(len(self.counts))]
-        current_value = self.my_total
+        # Generate the split
+        my_split = self._generate_split(target_value)
         
-        # Adjust to meet target by giving up least valuable items first
-        if current_value > target_value and self.sorted_items:
-            for val, idx in self.sorted_items:
-                if current_value <= target_value:
-                    break
-                available = my_split[idx]
-                if available == 0:
-                    continue
-                # Calculate how many to give up
-                max_give = min(available, int((current_value - target_value) // val))
-                if max_give > 0:
-                    my_split[idx] -= max_give
-                    current_value -= max_give * val
-            # If still above target, give up one more if possible (but not below min)
-            if current_value > target_value and self.sorted_items:
-                min_acceptable = 0.4 * self.my_total if remaining_turns <= 2 else 0.5 * self.my_total
-                for val, idx in self.sorted_items:
-                    if my_split[idx] > 0:
-                        new_val = current_value - val
-                        if new_val >= min_acceptable:
-                            my_split[idx] -= 1
-                            current_value = new_val
-                            break
-        
-        # Avoid repeating offers
+        # Make sure we don't repeat offers
         split_tuple = tuple(my_split)
-        if split_tuple in self.previous_my_offers:
-            modified = False
-            # First try adjusting zero-value items
-            for i in range(len(self.counts)):
-                if self.values[i] == 0:
-                    if my_split[i] < self.counts[i]:
-                        my_split[i] += 1
-                        new_tuple = tuple(my_split)
-                        if new_tuple not in self.previous_my_offers:
-                            modified = True
-                            break
-                        my_split[i] -= 1
-                    if my_split[i] > 0:
-                        my_split[i] -= 1
-                        new_tuple = tuple(my_split)
-                        if new_tuple not in self.previous_my_offers:
-                            modified = True
-                            break
-                        my_split[i] += 1
-            if modified:
-                split_tuple = tuple(my_split)
-            else:
-                # Try swapping same value items
-                value_groups = {}
-                for i, v in enumerate(self.values):
-                    if v not in value_groups:
-                        value_groups[v] = []
-                    value_groups[v].append(i)
-                for v in value_groups:
-                    if len(value_groups[v]) < 2:
-                        continue
-                    indices = value_groups[v]
-                    for i in range(len(indices)):
-                        for j in range(len(indices)):
-                            if i == j:
-                                continue
-                            idx_a, idx_b = indices[i], indices[j]
-                            if my_split[idx_a] > 0 and (self.counts[idx_b] - my_split[idx_b]) > 0:
-                                my_split[idx_a] -= 1
-                                my_split[idx_b] += 1
-                                modified = True
-                                break
-                        if modified:
-                            break
-                    if modified:
-                        break
-                if modified:
-                    split_tuple = tuple(my_split)
-                else:
-                    # If no swap, try to take one more least valuable if possible, else give up one
-                    # First try to take an item we gave up (if any)
-                    found = False
-                    for val, idx in reversed(self.sorted_items):
-                        if my_split[idx] < self.counts[idx] and self.values[idx] > 0:
-                            my_split[idx] += 1
-                            current_value += val
-                            found = True
-                            break
-                    if found:
-                        split_tuple = tuple(my_split)
-                    else:
-                        # Give up one least valuable if possible
-                        if self.sorted_items:
-                            min_acceptable = 0.4 * self.my_total if remaining_turns <= 2 else 0.5 * self.my_total
-                            for val, idx in self.sorted_items:
-                                if my_split[idx] > 0:
-                                    new_val = current_value - val
-                                    if new_val >= min_acceptable:
-                                        my_split[idx] -= 1
-                                        current_value = new_val
-                                        split_tuple = tuple(my_split)
-                                        break
-        
-        # Ensure valid split
-        my_split = [int(x) for x in my_split]
-        valid = True
-        for i in range(len(my_split)):
-            if my_split[i] < 0 or my_split[i] > self.counts[i]:
-                valid = False
-                break
-        if not valid:
-            # Fallback to simple split
-            my_split = [self.counts[i] if self.values[i] > 0 else 0 for i in range(len(self.counts))]
-            current_value = self.my_total
+        attempts = 0
+        while split_tuple in self.previous_offers and attempts < 100:
+            # Try to adjust the split slightly while keeping value >= target
+            my_split = self._adjust_split(my_split, target_value)
             split_tuple = tuple(my_split)
+            attempts += 1
+        
+        # Calculate the actual value of this split
+        split_value = sum(mi * vi for mi, vi in zip(my_split, self.values))
         
         # Update tracking
-        self.previous_my_offers.add(split_tuple)
-        self.my_offer_values.append(current_value)
+        self.previous_offers.add(split_tuple)
+        self.last_offer_value = split_value
         
         return my_split
+    
+    def _generate_split(self, target_value: float) -> list[int]:
+        # Start with all items
+        my_split = self.counts.copy()
+        current_value = self.my_total
+        
+        # If we already meet or are below target, return
+        if current_value <= target_value:
+            return my_split
+        
+        # Give up least valuable items first
+        for val, idx in self.sorted_items:
+            if current_value <= target_value or val <= 0:
+                continue
+            
+            # How many can we give up?
+            available = my_split[idx]
+            if available == 0:
+                continue
+            
+            # Max number to give up to get as close as possible to target without going below
+            max_give = min(available, int((current_value - target_value) // val))
+            if max_give > 0:
+                my_split[idx] -= max_give
+                current_value -= max_give * val
+            
+            # If we can give up one more without going below a reasonable minimum, do it
+            if current_value > target_value and my_split[idx] > 0:
+                min_acceptable = max(0.4 * self.my_total, target_value - val)
+                if current_value - val >= min_acceptable:
+                    my_split[idx] -= 1
+                    current_value -= val
+        
+        return my_split
+    
+    def _adjust_split(self, current_split: list[int], target_value: float) -> list[int]:
+        # Try to find a different split with value >= target_value
+        new_split = current_split.copy()
+        current_value = sum(mi * vi for mi, vi in zip(new_split, self.values))
+        
+        # First, try swapping items of same value
+        # Group items by their value
+        value_groups = {}
+        for i, v in enumerate(self.values):
+            if v not in value_groups:
+                value_groups[v] = []
+            value_groups[v].append(i)
+        
+        for v in value_groups:
+            indices = value_groups[v]
+            if len(indices) < 2:
+                continue
+            
+            # Try to swap between two items in the same value group
+            for i in range(len(indices)):
+                for j in range(i + 1, len(indices)):
+                    idx_a, idx_b = indices[i], indices[j]
+                    # Take one from a and give to b, if possible
+                    if new_split[idx_a] > 0 and new_split[idx_b] < self.counts[idx_b]:
+                        new_split[idx_a] -= 1
+                        new_split[idx_b] += 1
+                        return new_split
+                    # Take one from b and give to a, if possible
+                    if new_split[idx_b] > 0 and new_split[idx_a] < self.counts[idx_a]:
+                        new_split[idx_b] -= 1
+                        new_split[idx_a] += 1
+                        return new_split
+        
+        # If that doesn't work, try to make a small adjustment
+        # Find an item we can give up (least valuable)
+        for val, idx in self.sorted_items:
+            if new_split[idx] > 0 and val > 0:
+                # Find an item we can take instead (most valuable, same or lower value)
+                for val2, idx2 in reversed(self.sorted_items):
+                    if idx2 == idx:
+                        continue
+                    if new_split[idx2] < self.counts[idx2]:
+                        # Check if this keeps us above target
+                        new_val = current_value - val + val2
+                        if new_val >= max(target_value, 0.4 * self.my_total):
+                            new_split[idx] -= 1
+                            new_split[idx2] += 1
+                            return new_split
+        
+        # If all else fails, just take all positive value items and adjust
+        return self._generate_split(target_value)

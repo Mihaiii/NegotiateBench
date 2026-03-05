@@ -21,82 +21,66 @@ class Agent:
             my_val = sum(a * b for a, b in zip(o, self.values))
             self._update_beliefs(o)
             
-            if self._should_accept(my_val, remaining):
+            # Acceptance threshold decreases from 70% to 30% over time
+            # Always accept positive value on last possible turn
+            threshold = self.total_value * (0.70 - 0.40 * self.turn / self.total_turns)
+            if my_val >= threshold or (remaining == 0 and my_val > 0):
                 return None
         
-        offer = self._make_offer(remaining)
+        # Generate and store offer
+        offer = self._make_offer()
         self.last_offer = offer[:]
         return offer
     
     def _update_beliefs(self, o: list[int]):
-        """Update opponent value estimates based on their offer."""
+        """Update opponent value estimates based on what they offered me."""
         if self.last_offer is None:
             return
             
         for i in range(self.n):
+            # What opponent keeps now vs what they would have kept from my last offer
             keep_now = self.counts[i] - o[i]
             keep_before = self.counts[i] - self.last_offer[i]
             
-            # If opponent keeps more of item i than we offered them, they value it higher
+            # If they keep more than I offered them, they value it higher
             if keep_now > keep_before:
-                self.opp_values[i] *= 1.15
+                self.opp_values[i] *= 1.25
             elif keep_now < keep_before:
-                self.opp_values[i] *= 0.9
+                self.opp_values[i] *= 0.80
                 
-        # Renormalize to maintain total value constraint
+        # Renormalize to maintain constraint that opponent's total value equals mine
         curr_total = sum(v * c for v, c in zip(self.opp_values, self.counts))
         if curr_total > 0:
             scale = self.total_value / curr_total
             self.opp_values = [max(0.01, v * scale) for v in self.opp_values]
     
-    def _should_accept(self, val: int, remaining: int) -> bool:
-        """Determine if we should accept the offer."""
-        if val == 0:
-            return False
-        if remaining == 0:
-            return True
+    def _make_offer(self) -> list[int]:
+        """Generate offer claiming items with highest comparative advantage."""
+        # Calculate surplus (my value - estimated opponent value)
+        items = [(self.values[i] - self.opp_values[i], self.values[i], i) 
+                 for i in range(self.n)]
         
-        # Acceptance threshold decreases from 65% to 35% as deadline approaches
-        progress = (self.total_turns - remaining) / self.total_turns
-        threshold = self.total_value * (0.65 - 0.30 * progress)
-        return val >= threshold
-    
-    def _make_offer(self, remaining: int) -> list[int]:
-        """Generate offer respecting comparative advantage."""
-        # Calculate maximum efficient value (sum of items where I have higher valuation)
-        efficient_val = sum(
-            self.counts[i] * self.values[i] 
-            for i in range(self.n) 
-            if self.values[i] > self.opp_values[i]
-        )
+        # Sort by surplus desc, then by my value desc
+        items.sort(key=lambda x: (x[0], x[1]), reverse=True)
         
-        # Target decreases from 85% to 50% of efficient value as we concede
-        progress = (self.total_turns - remaining) / self.total_turns
-        target = efficient_val * (0.85 - 0.35 * progress)
-        
-        # Sort items by comparative advantage (my_value - opp_value) descending
-        items = list(range(self.n))
-        items.sort(key=lambda i: self.values[i] - self.opp_values[i], reverse=True)
+        # Target decreases from 85% to 45% as negotiation progresses
+        progress = self.turn / self.total_turns
+        target = self.total_value * (0.85 - 0.40 * progress)
         
         offer = [0] * self.n
         current_val = 0
         
-        for i in items:
-            if self.values[i] == 0:
-                continue  # Never take worthless items
+        for surplus, my_val, i in items:
+            if my_val == 0:
+                continue
             
-            # Take all of this item
-            offer[i] = self.counts[i]
-            current_val += self.counts[i] * self.values[i]
+            # Take item if it has positive surplus or if we still need minimum value
+            if surplus >= 0 or current_val < target * 0.3:
+                offer[i] = self.counts[i]
+                current_val += self.counts[i] * my_val
             
-            # Stop if we've reached target and next items have negative advantage
-            if current_val >= target:
-                # Check if remaining items have negative advantage
-                next_adv = self.values[items[-1]] - self.opp_values[items[-1]] if len(items) > 0 else -1
-                if i < len(items) - 1:
-                    next_idx = items[items.index(i) + 1]
-                    next_adv = self.values[next_idx] - self.opp_values[next_idx]
-                if next_adv < 0:
-                    break
+            # Stop if we hit target and next items would be inefficient (negative surplus)
+            if current_val >= target and surplus >= 0:
+                break
         
         return offer

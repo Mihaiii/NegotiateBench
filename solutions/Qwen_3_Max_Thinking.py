@@ -7,7 +7,6 @@ class Agent:
         self.total_value = sum(c * v for c, v in zip(counts, values))
         self.turn_count = 0
         self.opponent_offers = []
-        self.our_offers = []
         
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn_count += 1
@@ -30,153 +29,103 @@ class Agent:
                 
             self.opponent_offers.append(o)
             
-            # Calculate minimum acceptable value based on time pressure and opponent behavior
-            min_acceptable = self._calculate_min_acceptable(turns_remaining, offer_value)
-            
-            if offer_value >= min_acceptable:
-                return None
+            # Calculate minimum acceptable value
+            if turns_remaining == 1:
+                # Last turn - accept any positive offer
+                if offer_value > 0:
+                    return None
+            else:
+                # Calculate target based on time pressure
+                if turns_remaining <= 2:
+                    min_acceptable = max(1, self.total_value * 0.3)
+                elif turns_remaining <= 5:
+                    min_acceptable = self.total_value * 0.4
+                elif turns_remaining <= 10:
+                    min_acceptable = self.total_value * 0.5
+                else:
+                    min_acceptable = self.total_value * 0.6
+                
+                # If opponent is making concessions, be more flexible
+                if len(self.opponent_offers) >= 2:
+                    prev_value = sum(self.opponent_offers[-2][i] * self.values[i] for i in range(len(self.values)))
+                    if offer_value > prev_value:
+                        min_acceptable *= 0.9
+                
+                if offer_value >= min_acceptable:
+                    return None
         
         # Generate counter-offer
-        return self._generate_counter_offer(o, turns_remaining)
+        return self._generate_counter_offer(turns_remaining)
     
-    def _calculate_min_acceptable(self, turns_remaining: int, current_offer_value: float) -> float:
-        """Calculate minimum value to accept based on time pressure and negotiation dynamics."""
-        if turns_remaining == 1:
-            return 1 if self.total_value > 0 else 0  # Accept any positive offer on last turn
+    def _generate_counter_offer(self, turns_remaining: int) -> list[int]:
+        # Sort items by our value (descending)
+        item_indices = list(range(len(self.values)))
+        item_indices.sort(key=lambda i: self.values[i], reverse=True)
         
-        # Base thresholds that decrease over time
-        if turns_remaining <= 2:
-            base_threshold = 0.3
-        elif turns_remaining <= 5:
-            base_threshold = 0.4
-        elif turns_remaining <= 10:
-            base_threshold = 0.5
-        else:
-            base_threshold = 0.6
-            
-        # Adjust based on opponent behavior - if they're being reasonable, be more flexible
-        if len(self.opponent_offers) >= 2:
-            # Check if opponent is making concessions
-            last_offer_val = sum(self.opponent_offers[-1][i] * self.values[i] for i in range(len(self.values)))
-            prev_offer_val = sum(self.opponent_offers[-2][i] * self.values[i] for i in range(len(self.values)))
-            
-            # If opponent is offering us more, we can be slightly more flexible
-            if last_offer_val > prev_offer_val:
-                base_threshold *= 0.95
-        
-        return self.total_value * base_threshold
-    
-    def _generate_counter_offer(self, opponent_offer: list[int] | None, turns_remaining: int) -> list[int]:
-        """Generate a counter-offer that balances our desires with likelihood of acceptance."""
-        # Determine our target value based on time pressure
+        # Calculate target value based on time pressure
         if turns_remaining == 1:
             target_ratio = 0.3
         elif turns_remaining <= 3:
             target_ratio = 0.4
         elif turns_remaining <= 7:
             target_ratio = 0.5
-        elif turns_remaining <= 12:
-            target_ratio = 0.6
         else:
             target_ratio = 0.7
             
         target_value = self.total_value * target_ratio
         
-        # If we have opponent offer history, use it to infer their preferences
-        opponent_valuation_hints = self._infer_opponent_preferences()
-        
-        # Create initial proposal - take items we value most
+        # Start with taking nothing
         proposal = [0] * len(self.counts)
         current_value = 0
         
-        # Sort items by our value (descending)
-        valuable_items = [(self.values[i], i) for i in range(len(self.values))]
-        valuable_items.sort(reverse=True)
+        # First, take all items we value that opponent seems to value less
+        if self.opponent_offers:
+            # Calculate what opponent typically offers us (what they're willing to give up)
+            avg_offers = [0] * len(self.counts)
+            for offer in self.opponent_offers:
+                for i in range(len(self.counts)):
+                    avg_offers[i] += offer[i]
+            for i in range(len(self.counts)):
+                avg_offers[i] /= len(self.opponent_offers)
+            
+            # Take items where opponent offers us a lot (they don't value them much)
+            for i in item_indices:
+                if self.values[i] == 0:
+                    continue
+                    
+                # If opponent typically offers us most of this item, take it
+                if avg_offers[i] >= self.counts[i] * 0.7:
+                    items_to_take = self.counts[i]
+                    if current_value + items_to_take * self.values[i] <= target_value * 2:
+                        proposal[i] = items_to_take
+                        current_value += items_to_take * self.values[i]
         
-        # First pass: take what we want
-        for our_value, idx in valuable_items:
-            if our_value == 0:
-                continue
-                
+        # Then fill remaining target with our most valuable items
+        for i in item_indices:
             if current_value >= target_value:
                 break
+            if self.values[i] == 0:
+                continue
+            if proposal[i] == self.counts[i]:
+                continue
                 
-            # How many can we take?
-            max_available = self.counts[idx]
-            
-            # Calculate how many we need to reach target
+            # Take as much as needed to reach target
             remaining_needed = target_value - current_value
-            needed_items = (remaining_needed + our_value - 1) // our_value
-            items_to_take = min(max_available, needed_items)
-            
-            # For first move, be slightly more generous
-            if opponent_offer is None and len(self.opponent_offers) == 0:
-                if max_available > 1:
-                    items_to_take = min(items_to_take, max(1, max_available - 1))
-            
-            proposal[idx] = int(items_to_take)
-            current_value += items_to_take * our_value
+            items_needed = min(self.counts[i] - proposal[i], (remaining_needed + self.values[i] - 1) // self.values[i])
+            proposal[i] += items_needed
+            current_value += items_needed * self.values[i]
         
-        # Second pass: adjust based on what opponent might accept
-        # If we have info about what opponent values, try to give them more of those
-        if opponent_valuation_hints and opponent_offer is not None:
-            # Identify items opponent seems to value highly
-            opponent_valuable_indices = []
-            for idx, opp_hint_value in enumerate(opponent_valuation_hints):
-                if opp_hint_value > 0 and self.values[idx] == 0:
-                    # Opponent values it but we don't - definitely give it to them
-                    proposal[idx] = 0
-                elif opp_hint_value > 0 and self.values[idx] > 0:
-                    # Both value it - consider sharing
-                    if len(self.opponent_offers) > 0:
-                        # See what opponent has been offering us for this item
-                        avg_offered = sum(offer[idx] for offer in self.opponent_offers) / len(self.opponent_offers)
-                        if avg_offered < self.counts[idx] * 0.3:  # Opponent keeps most of this
-                            # Reduce what we take if we're being too greedy
-                            if proposal[idx] > self.counts[idx] * 0.7:
-                                proposal[idx] = max(0, int(self.counts[idx] * 0.5))
-            
+        # Don't be greedy on first move - leave something for opponent
+        if len(self.opponent_offers) == 0:
+            for i in reversed(item_indices):  # Start with least valuable items we took
+                if self.values[i] > 0 and proposal[i] > 0:
+                    # Reduce by 1 if we have more than 1, or if it's a high-value item
+                    if proposal[i] > 1 or self.values[i] > self.total_value * 0.1:
+                        proposal[i] = max(0, proposal[i] - 1)
+                        break
+        
         # Ensure we don't exceed counts
         for i in range(len(proposal)):
             proposal[i] = max(0, min(proposal[i], self.counts[i]))
         
-        # Special case: if this is late game and we're being stubborn, be more reasonable
-        if turns_remaining <= 5 and len(self.our_offers) >= 2:
-            # Check if we've been making the same offer repeatedly
-            if len(self.our_offers) >= 2:
-                last_our_offer = self.our_offers[-1]
-                same_as_last = True
-                for i in range(len(proposal)):
-                    if proposal[i] != last_our_offer[i]:
-                        same_as_last = False
-                        break
-                
-                if same_as_last and turns_remaining <= 3:
-                    # Make a small concession on something we care less about
-                    for our_value, idx in sorted(valuable_items, reverse=False):  # Least valuable first
-                        if our_value > 0 and proposal[idx] > 0:
-                            proposal[idx] = max(0, proposal[idx] - 1)
-                            break
-        
-        self.our_offers.append(proposal.copy())
         return proposal
-    
-    def _infer_opponent_preferences(self) -> list[float]:
-        """Infer opponent's relative valuations based on their offers."""
-        if not self.opponent_offers:
-            return [0.0] * len(self.counts)
-        
-        # Calculate how much opponent keeps of each item (what they don't offer us)
-        opponent_keeps = [0.0] * len(self.counts)
-        
-        for offer in self.opponent_offers:
-            for i in range(len(self.counts)):
-                kept = self.counts[i] - offer[i]
-                opponent_keeps[i] += kept
-        
-        # Normalize to get relative preferences
-        total_kept = sum(opponent_keeps)
-        if total_kept == 0:
-            return [1.0] * len(self.counts)
-            
-        return [kept / total_kept for kept in opponent_keeps]

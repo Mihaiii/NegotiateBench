@@ -64,18 +64,19 @@ class Agent:
                 if current_offer_value >= self.my_total:
                     return None
                 
+                # 2. If it's the last turn, accept anything better than 0
+                if actual_turn == self.total_turns:
+                    if current_offer_value >= 0:
+                        return None
+                
                 # Calculate dynamic acceptance threshold
                 progress = (actual_turn - 1) / (self.total_turns - 1) if self.total_turns > 1 else 0.0
-                # Start at 85%, decrease to 50% by the last turn
-                threshold = self.my_total * (0.85 - 0.35 * progress)
+                # Start at 80%, decrease to 50% by the end
+                threshold = self.my_total * (0.8 - 0.3 * progress)
                 
                 # Never go below the best offer we've received (if it's decent)
-                if self.best_offer_received >= 0.3 * self.my_total:
+                if self.best_offer_received >= 0.2 * self.my_total:
                     threshold = max(threshold, self.best_offer_received)
-                
-                # On the last turn, make sure we at least get the best offer or 30%
-                if actual_turn == self.total_turns:
-                    threshold = max(self.best_offer_received, 0.3 * self.my_total)
                 
                 # Clamp threshold to valid range
                 threshold = max(0, min(threshold, self.my_total))
@@ -91,7 +92,7 @@ class Agent:
         target_fraction = 0.9 - 0.35 * progress
         
         # Don't target less than the best offer we've received (if decent)
-        if self.best_offer_received >= 0.3 * self.my_total:
+        if self.best_offer_received >= 0.2 * self.my_total:
             target_fraction = max(target_fraction, self.best_offer_received / self.my_total)
         
         # Minimum target fractions based on remaining turns
@@ -117,16 +118,13 @@ class Agent:
             split_tuple = tuple(my_split)
             attempts += 1
         
-        # Calculate the actual value of this split
-        split_value = sum(mi * vi for mi, vi in zip(my_split, self.values))
-        
         # Update tracking
         self.previous_offers.add(split_tuple)
         
         return my_split
     
     def _generate_split(self, target_value: float) -> list[int]:
-        # Start with all items
+        # Start with all items we value
         my_split = self.counts.copy()
         current_value = self.my_total
         
@@ -135,18 +133,20 @@ class Agent:
             return my_split
         
         # Determine which items to prioritize giving away
-        # If we have partner data, give away items they seem to want
         give_priority = []
         if self.partner_offer_count > 0:
-            # Sort items by how much partner keeps (more = more we should give)
+            # Sort items by:
+            # 1. Higher partner keep ratio first (more they want it)
+            # 2. Lower our value first (less we care about it)
             item_scores = []
             for i in range(len(self.counts)):
-                # Score: (partner keep ratio, -our value)
-                # Higher partner keep ratio = more we should give
-                # Lower our value = more we should give
-                keep_ratio = self.partner_keep_counts[i] / (self.partner_offer_count * self.counts[i]) if self.counts[i] > 0 else 0
+                if self.counts[i] == 0:
+                    keep_ratio = 0.0
+                else:
+                    keep_ratio = self.partner_keep_counts[i] / (self.partner_offer_count * self.counts[i])
+                # Use negative keep ratio so that higher ratios come first when sorted ascending
+                # Use our value so lower values come first
                 item_scores.append((-keep_ratio, self.values[i], i))
-            # Sort: first by higher keep ratio (so lower -keep_ratio), then lower our value
             item_scores.sort()
             give_priority = [i for (_, _, i) in item_scores]
         else:
@@ -170,7 +170,7 @@ class Agent:
             
             # If we can give up one more without going below a reasonable minimum, do it
             if current_value > target_value and my_split[idx] > 0:
-                min_acceptable = max(0.3 * self.my_total, target_value - self.values[idx])
+                min_acceptable = max(0.2 * self.my_total, target_value - self.values[idx])
                 if current_value - self.values[idx] >= min_acceptable:
                     my_split[idx] -= 1
                     current_value -= self.values[idx]
@@ -221,7 +221,7 @@ class Agent:
                     if new_split[idx2] < self.counts[idx2]:
                         # Check if this keeps us above target
                         new_val = current_value - val + val2
-                        if new_val >= max(target_value, 0.3 * self.my_total):
+                        if new_val >= max(target_value, 0.2 * self.my_total):
                             new_split[idx] -= 1
                             new_split[idx2] += 1
                             return new_split

@@ -3,58 +3,56 @@ class Agent:
         self.counts = counts
         self.values = values
         self.max_rounds = max_rounds
-        self.total = sum(c * v for c, v in zip(counts, values))
+        self.me = me  # 0 = first, 1 = second
         self.turn = 0
-        self.last_offer = None
-        self.my_value_sum = sum(c * v for c, v in zip(counts, values))
+        self.total = sum(c * v for c, v in zip(counts, values))
         
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.turn += 1
-        current_round = (self.turn + 1) // 2
+        round_num = (self.turn + 1) // 2
         
+        # Check if we should accept opponent's offer
         if o is not None:
-            offered_value = sum(ov * self.values[i] for i, ov in enumerate(o))
-            min_acceptable = self.total * (0.3 + 0.5 * (current_round / self.max_rounds))
-            if offered_value >= min_acceptable:
-                return None
+            my_value = sum(o[i] * self.values[i] for i in range(len(o)))
+            # Calculate acceptable threshold - more demanding in early rounds, less in late rounds
+            # Use a minimum floor to ensure we don't accept too little
+            min_acceptable = self.total * max(0.2, 0.5 - (round_num / (self.max_rounds * 2)))
+            
+            if my_value >= min_acceptable:
+                return None  # Accept the offer
         
-        if current_round == 1 and o is None:
-            best_items = sorted(range(len(self.counts)), key=lambda i: self.values[i], reverse=True)
-            offer = [0] * len(self.counts)
-            remaining = self.counts.copy()
-            for i in best_items[:3]:
-                take = min(remaining[i], (self.counts[i] + 1) // 2)
+        # If we get here, we need to make a counter-offer
+        # Target a value that decreases as rounds progress (concession strategy)
+        target_value = int(self.total * max(0.25, 0.6 - (round_num / (self.max_rounds * 1.5))))
+        
+        # Greedy approach: take items with highest value-to-count ratio first
+        # Value per item for each type
+        vpi = [(self.values[i], i) for i in range(len(self.counts))]
+        vpi.sort(reverse=True)
+        
+        offer = [0] * len(self.counts)
+        remaining = self.counts.copy()
+        
+        # First pass: try to maximize value per item
+        for val, i in vpi:
+            if remaining[i] > 0 and val > 0:
+                take = min(remaining[i], max(1, remaining[i] // 2))
                 offer[i] = take
                 remaining[i] -= take
-            return offer
         
-        if self.last_offer is not None:
-            last_value = sum(lo * self.values[i] for i, lo in enumerate(self.last_offer))
-            if last_value < self.total * 0.35:
-                best_items = sorted(range(len(self.counts)), key=lambda i: self.values[i], reverse=True)
-                offer = [0] * len(self.counts)
-                remaining = self.counts.copy()
-                for i in best_items[:4]:
-                    take = min(remaining[i], max(1, self.counts[i] // 2))
-                    offer[i] = take
-                    remaining[i] -= take
-                self.last_offer = offer
-                return offer
+        # Calculate current value
+        current_value = sum(offer[i] * self.values[i] for i in range(len(offer)))
         
-        current_min = int(self.total * (0.2 + 0.6 * (current_round / self.max_rounds)))
-        best_offer = None
-        best_value = 0
+        # If not enough, adjust by taking more of valuable items
+        if current_value < target_value:
+            # Try to add more items starting from most valuable
+            for val, i in vpi:
+                if remaining[i] > 0:
+                    while remaining[i] > 0 and current_value < target_value:
+                        offer[i] += 1
+                        remaining[i] -= 1
+                        current_value += val
+                        if val == 0:
+                            break
         
-        from itertools import product
-        for take_counts in product(*[range(c + 1) for c in self.counts]):
-            give_counts = [self.counts[i] - take_counts[i] for i in range(len(self.counts))]
-            my_value = sum(take_counts[i] * self.values[i] for i in range(len(self.counts)))
-            if my_value >= current_min and my_value > best_value:
-                best_offer = take_counts
-                best_value = my_value
-        
-        if best_offer is None:
-            best_offer = [0] * len(self.counts)
-            
-        self.last_offer = best_offer
-        return best_offer
+        return offer

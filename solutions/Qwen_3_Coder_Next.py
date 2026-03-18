@@ -1,166 +1,199 @@
 class Agent:
     def __init__(self, me: int, counts: list[int], values: list[int], max_rounds: int):
+        self.me = me
         self.counts = counts
         self.values = values
         self.max_rounds = max_rounds
         self.total_value = sum(c * v for c, v in zip(counts, values))
-        self.is_first = (me == 0)
-        self.rounds_remaining = max_rounds
-        self.opponent_valuations = [1] * len(counts)
+        self.opponent_total = self.total_value  # Assumption: same total value for opponent
+        
+        # State tracking
+        self.round_num = 0
+        self.last_opponent_offer = None
         self.offer_history = []
-        self.turn_count = 0
         
     def offer(self, o: list[int] | None) -> list[int] | None:
-        self.turn_count += 1
-        
-        # Update opponent valuation based on their offer
+        # Update round counter
         if o is not None:
-            self.rounds_remaining -= 1
+            self.round_num += 1
+            self.last_opponent_offer = o.copy()
             self.offer_history.append(o.copy())
-            self._update_opponent_valuations()
+        
+        # Calculate remaining rounds (including this one if we make an offer)
+        rounds_left = self.max_rounds - self.round_num
+        
+        # Calculate our value for any potential offer
+        if o is not None:
+            our_value_from_offer = sum(v * x for v, x in zip(self.values, o))
+        else:
+            our_value_from_offer = None
+        
+        # Determine if we should accept the opponent's offer
+        if o is not None and self._should_accept(o, rounds_left):
+            return None
             
-            # Calculate value of opponent's offer
-            our_value = sum(v * x for v, x in zip(self.values, o))
-            
-            # Should we accept?
-            if self._should_accept(our_value):
-                return None
-        
-        # Make our offer
-        return self._make_offer()
+        # Make our best offer
+        return self._make_strategic_offer(rounds_left)
     
-    def _update_opponent_valuations(self):
-        """Estimate opponent valuations more accurately"""
-        n_items = len(self.counts)
-        if len(self.offer_history) < 2:
-            return
+    def _should_accept(self, opponent_offer: list[int], rounds_left: int) -> bool:
+        """Determine if we should accept the opponent's offer."""
+        our_value = sum(v * x for v, x in zip(self.values, opponent_offer))
         
-        # Get the last two offers from opponent
-        last_offer = self.offer_history[-1]
-        prev_offer = self.offer_history[-2] if len(self.offer_history) >= 2 else None
-        
-        # Calculate what the opponent kept in each offer
-        last_opponent_get = [self.counts[i] - last_offer[i] for i in range(n_items)]
-        
-        # If opponent kept the same items in consecutive offers, likely valuable to them
-        # If they reduced something, it's less valuable
-        for i in range(n_items):
-            if last_opponent_get[i] == self.counts[i]:  # Always keeps all
-                self.opponent_valuations[i] = max(3, max(self.values) if max(self.values) > 0 else 1)
-            elif last_opponent_get[i] == 0:  # Never keeps any
-                self.opponent_valuations[i] = 0
-            elif prev_offer and last_opponent_get[i] > 0 and self.counts[i] - prev_offer[i] > 0:
-                # Kept in both offers, likely valuable
-                self.opponent_valuations[i] = max(2, self.opponent_valuations[i])
-            elif last_opponent_get[i] > 0:
-                # Kept only in last offer, maybe valuable
-                self.opponent_valuations[i] = max(1, self.opponent_valuations[i])
-            else:
-                # Reduced or eliminated in last offer, less valuable
-                self.opponent_valuations[i] = max(0, self.opponent_valuations[i] - 1)
-    
-    def _should_accept(self, our_value: int) -> bool:
-        """Determine if we should accept the current offer"""
-        rounds_left = self.rounds_remaining
+        # If no rounds left, must accept
         if rounds_left <= 0:
             return True
-        
-        # Calculate minimum acceptable value based on remaining rounds
-        # Be more selective early on, more willing to accept later
-        # Consider who moves first as first mover has advantage
-        if self.is_first:
-            # As first mover, we should get more than half on average
-            # But be more willing to accept as rounds decrease
-            min_acceptable_ratio = 0.5 + 0.1 * (1 - rounds_left / self.max_rounds)
-        else:
-            # As second mover, we can wait for better offers
-            # But risk getting nothing if negotiations fail
-            min_acceptable_ratio = 0.4 + 0.15 * (1 - rounds_left / self.max_rounds)
             
-        min_acceptable = int(self.total_value * min_acceptable_ratio)
+        # Calculate the minimum value we'd get if we continue
+        # Use game theory: in the final round, the mover has advantage
+        # Assume we can get at least half the remaining value if we continue
+        min_future_value = self.total_value * 0.4
         
-        # If offer is good enough or we're very close to end, accept
-        return our_value >= min_acceptable or rounds_left <= 1
+        # Be more willing to accept as rounds decrease
+        acceptance_threshold = min_future_value * (0.5 + rounds_left / (2 * self.max_rounds))
+        
+        return our_value >= acceptance_threshold
     
-    def _make_offer(self) -> list[int]:
-        """Create a strategic offer"""
+    def _make_strategic_offer(self, rounds_left: int) -> list[int]:
+        """Create an offer that the opponent is likely to accept."""
         n_items = len(self.counts)
-        offer = [0] * n_items
         
-        # Calculate target value for ourselves
-        rounds_left = self.rounds_remaining
+        # Estimate opponent values based on their past behavior
+        opponent_estimate = self._estimate_opponent_values()
         
-        # Adjust strategy based on position and rounds
-        if self.is_first:
-            # First mover: be more aggressive initially, gradually moderate
-            target_ratio = 0.6 + 0.1 * (1 - rounds_left / self.max_rounds)
-            target_ratio = min(0.7, max(0.5, target_ratio))
-        else:
-            # Second mover: be more moderate initially, more aggressive if needed
-            target_ratio = 0.5 + 0.1 * (1 - rounds_left / self.max_rounds)
-            target_ratio = min(0.6, max(0.4, target_ratio))
+        # Calculate total value for opponent with estimated values
+        opponent_total_estimate = sum(c * v for c, v in zip(self.counts, opponent_estimate))
+        
+        # Target split: try to give opponent just enough to accept
+        # First mover should get more, second mover can be more demanding
+        if self.me == 0:  # First mover
+            # Offer opponent about 45-55% depending on rounds
+            opponent_target_ratio = 0.45 + 0.1 * (1 - rounds_left / self.max_rounds)
+        else:  # Second mover
+            # Can be more demanding as we've seen their offers
+            opponent_target_ratio = 0.4 + 0.15 * (1 - rounds_left / self.max_rounds)
             
-        target_value = int(self.total_value * target_ratio)
+        opponent_target_value = int(opponent_total_estimate * opponent_target_ratio)
         
-        # Sort items: prefer items we value highly and opponent likely values low
+        # Create offer that minimizes what we give while meeting opponent's target
+        offer = [0] * n_items
+        opponent_get_value = 0
+        
+        # Sort items by how "expensive" they are for the opponent (high value to them, low to us)
+        # We want to give them items that are valuable to them but not to us
         items = list(range(n_items))
         
-        def item_priority(i):
+        def item_cost(i):
             our_val = self.values[i]
-            opp_val = max(1, self.opponent_valuations[i])
+            opp_val = opponent_estimate[i]
             
-            # High priority: high our value, low opponent value
-            if our_val == 0:
-                return -100  # Avoid items we don't value
+            # Avoid giving items we value highly
+            if our_val > 0 and opp_val == 0:
+                return float('-inf')  # Don't give these to opponent
+            if our_val == 0 and opp_val > 0:
+                return float('inf')  # These are perfect for giving
             if opp_val == 0:
-                return float('inf')  # Items opponent doesn't value, take all
-            return our_val / opp_val
+                return 0  # Items opponent doesn't want
+            # Balance: give items where opponent values highly relative to us
+            return opp_val / max(1, our_val)
         
-        items.sort(key=item_priority, reverse=True)
+        items.sort(key=item_cost, reverse=True)
         
-        # Take items until we reach target value
-        current_value = 0
+        # Give items to opponent until they reach target value
         for i in items:
-            if current_value >= target_value:
+            if opponent_get_value >= opponent_target_value:
                 break
                 
-            item_value = self.counts[i] * self.values[i]
-            
-            # Don't take items with zero value to us unless necessary
-            if self.values[i] == 0:
+            # Skip items we value highly if opponent doesn't
+            if self.values[i] > 0 and opponent_estimate[i] == 0:
                 continue
                 
             offer[i] = self.counts[i]
-            current_value += item_value
+            opponent_get_value += self.counts[i] * opponent_estimate[i]
         
-        # If we still don't have enough value, try to add some items we value less
-        if current_value < target_value:
+        # If we still need to give more value, give items where both value equally
+        if opponent_get_value < opponent_target_value:
             for i in items:
-                if offer[i] < self.counts[i]:
-                    # Add items if they're valuable to us
-                    needed_value = target_value - current_value
-                    item_value = self.values[i]
+                if offer[i] < self.counts[i] and opponent_estimate[i] > 0:
+                    needed = opponent_target_value - opponent_get_value
+                    items_to_add = min(self.counts[i] - offer[i], 
+                                      (needed + opponent_estimate[i] - 1) // opponent_estimate[i])
+                    offer[i] += items_to_add
+                    opponent_get_value += items_to_add * opponent_estimate[i]
                     
-                    if item_value > 0:
-                        num_to_add = min(self.counts[i] - offer[i], 
-                                        (needed_value + item_value - 1) // item_value)
-                        offer[i] += num_to_add
-                        current_value += num_to_add * item_value
-                        
-                    if current_value >= target_value:
-                        break
-        
-        # Ensure we don't end up with zero value if possible
-        if current_value == 0 and self.total_value > 0:
-            # Take at least one item with positive value
-            for i in items:
-                if self.values[i] > 0:
-                    offer[i] = self.counts[i]
+                if opponent_get_value >= opponent_target_value:
                     break
         
-        # Ensure we don't exceed total items
+        # Ensure we don't end with zero value
+        our_value_in_offer = sum(v * x for v, x in zip(self.values, offer))
+        if our_value_in_offer == 0 and self.total_value > 0:
+            # Give opponent minimal amount while keeping something for ourselves
+            # Find items we value that opponent values less
+            best_item = max(range(n_items), 
+                          key=lambda i: self.values[i] - opponent_estimate[i])
+            for i in items:
+                if self.values[i] > 0 and opponent_estimate[i] == 0:
+                    offer[i] = self.counts[i]
+                    break
+            
+        # Validate offer
         for i in range(n_items):
             if offer[i] > self.counts[i]:
                 offer[i] = self.counts[i]
                 
         return offer
+    
+    def _estimate_opponent_values(self) -> list[int]:
+        """Estimate opponent valuations based on their behavior."""
+        n_items = len(self.counts)
+        
+        # Initialize with uniform values (conservative)
+        estimate = [1] * n_items
+        
+        if not self.offer_history:
+            return estimate
+            
+        # Analyze opponent's offers to see what they wanted
+        # Look at what they kept in their offers
+        for offer in self.offer_history:
+            for i in range(n_items):
+                kept = self.counts[i] - offer[i]
+                
+                # If opponent kept many items of this type, likely valuable
+                if kept > self.counts[i] * 0.7:
+                    estimate[i] = max(estimate[i], 3)
+                elif kept > self.counts[i] * 0.3:
+                    estimate[i] = max(estimate[i], 2)
+        
+        # Refine estimates based on how much the opponent persisted
+        # If they kept offering the same thing, likely a firm position
+        if len(self.offer_history) >= 2:
+            # Check consistency across offers
+            for i in range(n_items):
+                offers_consistent = True
+                base_kept = self.counts[i] - self.offer_history[0][i]
+                
+                for offer in self.offer_history[1:]:
+                    current_kept = self.counts[i] - offer[i]
+                    if current_kept != base_kept:
+                        offers_consistent = False
+                        break
+                
+                if offers_consistent and base_kept > 0:
+                    estimate[i] = max(estimate[i], 2)
+        
+        # Adjust based on which items we value highly vs. what they offered
+        # If they consistently refused items we value, they likely value them more
+        for i in range(n_items):
+            if self.values[i] > 0:
+                refusals = 0
+                total_offers = len(self.offer_history)
+                
+                for offer in self.offer_history:
+                    if offer[i] == 0:  # They refused to give us this item
+                        refusals += 1
+                
+                if refusals > total_offers * 0.7 and self.values[i] > 0:
+                    # They kept items we want - likely valuable to them
+                    estimate[i] = max(estimate[i], 3)
+        
+        return estimate

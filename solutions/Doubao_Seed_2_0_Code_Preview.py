@@ -14,7 +14,8 @@ class Agent:
         )
         
         self.turn_count = 0
-        self.best_offer_received = 0  # Best value we've been offered
+        self.best_offer_value = 0  # Best value we've been offered
+        self.best_offer_split = None  # The actual split that gave best value
         self.previous_offers = set()  # To avoid repeating our offers
         
         # Track partner's behavior to infer their values
@@ -39,20 +40,22 @@ class Agent:
         
         # Process incoming offer
         current_offer_value = 0
+        valid_offer = False
         if o is not None:
             # Validate offer first
-            valid = True
+            valid_offer = True
             for i in range(len(o)):
                 if not isinstance(o[i], int) or o[i] < 0 or o[i] > self.counts[i]:
-                    valid = False
+                    valid_offer = False
                     break
             
-            if valid:
+            if valid_offer:
                 current_offer_value = sum(oi * vi for oi, vi in zip(o, self.values))
                 
                 # Update best offer received
-                if current_offer_value > self.best_offer_received:
-                    self.best_offer_received = current_offer_value
+                if current_offer_value > self.best_offer_value:
+                    self.best_offer_value = current_offer_value
+                    self.best_offer_split = o.copy()
                 
                 # Update partner tracking
                 self.partner_offer_count += 1
@@ -71,12 +74,15 @@ class Agent:
                 
                 # Calculate dynamic acceptance threshold
                 progress = (actual_turn - 1) / (self.total_turns - 1) if self.total_turns > 1 else 0.0
-                # Start at 80%, decrease to 50% by the end
-                threshold = self.my_total * (0.8 - 0.3 * progress)
+                # Start at 70%, decrease to 50% by the end
+                threshold = self.my_total * (0.7 - 0.2 * progress)
                 
-                # Never go below the best offer we've received (if it's decent)
-                if self.best_offer_received >= 0.2 * self.my_total:
-                    threshold = max(threshold, self.best_offer_received)
+                # Never go below the best offer we've received
+                threshold = max(threshold, self.best_offer_value)
+                
+                # If we're past halfway, accept if current offer is at least best offer
+                if progress >= 0.5 and current_offer_value >= self.best_offer_value:
+                    return None
                 
                 # Clamp threshold to valid range
                 threshold = max(0, min(threshold, self.my_total))
@@ -88,18 +94,18 @@ class Agent:
         # Generate counter-offer
         # Calculate target value for ourselves
         progress = (actual_turn - 1) / (self.total_turns - 1) if self.total_turns > 1 else 0.0
-        # Start at 90%, decrease to 55% by the end
-        target_fraction = 0.9 - 0.35 * progress
+        # Start at 80%, decrease to 50% by the end
+        target_fraction = 0.8 - 0.3 * progress
         
-        # Don't target less than the best offer we've received (if decent)
-        if self.best_offer_received >= 0.2 * self.my_total:
-            target_fraction = max(target_fraction, self.best_offer_received / self.my_total)
+        # Don't target less than the best offer we've received
+        if self.best_offer_value > 0:
+            target_fraction = max(target_fraction, self.best_offer_value / self.my_total)
         
         # Minimum target fractions based on remaining turns
         if remaining_turns > 4:
-            target_fraction = max(target_fraction, 0.7)
+            target_fraction = max(target_fraction, 0.65)
         elif remaining_turns > 2:
-            target_fraction = max(target_fraction, 0.6)
+            target_fraction = max(target_fraction, 0.55)
         else:
             target_fraction = max(target_fraction, 0.5)
         
@@ -107,8 +113,16 @@ class Agent:
         target_value = target_fraction * self.my_total
         target_value = max(0, min(target_value, self.my_total))
         
-        # Generate the split
-        my_split = self._generate_split(target_value)
+        # First, try using the best offer split if it's good enough
+        my_split = None
+        if self.best_offer_split is not None:
+            best_split_value = sum(oi * vi for oi, vi in zip(self.best_offer_split, self.values))
+            if best_split_value >= target_value - 1e-9:  # Account for floating point errors
+                my_split = self.best_offer_split.copy()
+        
+        # If best split isn't good enough, generate a new one
+        if my_split is None:
+            my_split = self._generate_split(target_value)
         
         # Make sure we don't repeat offers
         split_tuple = tuple(my_split)
@@ -181,6 +195,7 @@ class Agent:
         # Try to find a different split with value >= target_value
         new_split = current_split.copy()
         current_value = sum(mi * vi for mi, vi in zip(new_split, self.values))
+        min_acceptable = max(target_value, 0.2 * self.my_total)
         
         # First, try swapping items of same value
         # Group items by their value
@@ -210,21 +225,35 @@ class Agent:
                         new_split[idx_a] += 1
                         return new_split
         
-        # If that doesn't work, try to make a small adjustment
+        # If that doesn't work, try to give up a low-value item and take a zero-value item (if any)
+        # First, find a zero-value item we can take
+        zero_val_indices = [i for i, v in enumerate(self.values) if v == 0]
+        for val, idx in self.sorted_items:
+            if val <= 0:
+                continue
+            if new_split[idx] > 0:
+                # Try to take a zero-value item instead
+                for z_idx in zero_val_indices:
+                    if new_split[z_idx] < self.counts[z_idx]:
+                        new_split[idx] -= 1
+                        new_split[z_idx] += 1
+                        return new_split
+        
+        # If that doesn't work, try to make a small adjustment (give up one, take another)
         # Find an item we can give up (least valuable first)
         for val, idx in self.sorted_items:
             if new_split[idx] > 0 and val > 0:
-                # Find an item we can take instead (most valuable, same or lower value)
+                # Find an item we can take instead (most valuable first)
                 for val2, idx2 in reversed(self.sorted_items):
                     if idx2 == idx:
                         continue
                     if new_split[idx2] < self.counts[idx2]:
                         # Check if this keeps us above target
                         new_val = current_value - val + val2
-                        if new_val >= max(target_value, 0.2 * self.my_total):
+                        if new_val >= min_acceptable - 1e-9:
                             new_split[idx] -= 1
                             new_split[idx2] += 1
                             return new_split
         
-        # If all else fails, just take all positive value items and adjust
-        return self._generate_split(target_value)
+        # If all else fails, try generating a split with slightly lower target
+        return self._generate_split(max(target_value - self.my_total * 0.05, 0.5 * self.my_total))

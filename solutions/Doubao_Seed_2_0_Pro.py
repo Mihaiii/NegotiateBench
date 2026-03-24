@@ -14,15 +14,15 @@ class Agent:
         self.opponent_kept_ema = [0.0] * len(counts)
         self.my_previous_offers = []
         self.sorted_my_value = sorted(range(len(counts)), key=lambda x: (-values[x], -counts[x]))
-        self.abs_min_acceptable = max(0.25 * self.total_value, 1 if self.total_value > 0 else 0)
-        self.min_desired = self.total_value * 0.7  # Lower initial demand to be more reasonable
+        self.abs_min_acceptable = max(0.4 * self.total_value, 1 if self.total_value > 0 else 0)
+        self.min_desired = self.total_value * 0.8  # Higher initial demand
 
     def offer(self, o: list[int] | None) -> list[int] | None:
         self.offers_made += 1
         offers_left = self.total_offers - self.offers_made
         num_obj = len(self.counts)
 
-        # Edge case: no value for us, accept immediately or give all to opponent
+        # Edge case: no value for us
         if self.total_value == 0:
             return None if o is not None else [0] * num_obj
 
@@ -34,35 +34,40 @@ class Agent:
                 current_offer_val = sum(o[i] * self.values[i] for i in range(num_obj))
                 self.opponent_offers.append(o.copy())
                 self.opponent_offer_values.append(current_offer_val)
-                # Update EMA of items opponent keeps
+                # Update EMA of items opponent keeps (weight recent more)
                 for i in range(num_obj):
                     kept = self.counts[i] - o[i]
-                    self.opponent_kept_ema[i] = 0.6 * self.opponent_kept_ema[i] + 0.4 * kept
+                    self.opponent_kept_ema[i] = 0.7 * self.opponent_kept_ema[i] + 0.3 * kept
                 # Update best offer received
                 if current_offer_val > self.best_offer_val:
                     self.best_offer_val = current_offer_val
 
-            # Final turn: take anything > 0, better than nothing
+            # Final turn: take anything > 0
             if offers_left <= 0:
                 return None if current_offer_val > 0 else [0]*num_obj
 
-            # Accept immediately if near fair split
-            if current_offer_val >= self.total_value * 0.48:
-                return None
-
-            # Accept if opponent offers are decreasing, take best we have
-            if len(self.opponent_offer_values) >= 3 and \
-               self.opponent_offer_values[-1] < self.opponent_offer_values[-2] < self.opponent_offer_values[-3]:
-                if current_offer_val >= self.best_offer_val * 0.97:
+            # Accept if next turn is last and we get at least minimum
+            if offers_left <= 1 and self.me != self.last_offerer:
+                if current_offer_val >= self.abs_min_acceptable:
                     return None
 
-            # Accept if above minimum with few offers left
-            if offers_left <= 2 and current_offer_val >= self.abs_min_acceptable * 0.9:
+            # Accept immediately if at least slightly above fair split
+            if current_offer_val >= self.total_value * 0.52:
                 return None
 
-            # Accept if offer is near best received after half negotiation
+            # Accept if opponent offers are decreasing AND we have few offers left
+            if len(self.opponent_offer_values) >= 3 and offers_left <= 3 and \
+               self.opponent_offer_values[-1] < self.opponent_offer_values[-2] < self.opponent_offer_values[-3]:
+                if current_offer_val >= self.best_offer_val * 0.98:
+                    return None
+
+            # Accept if above minimum with very few offers left
+            if offers_left <= 2 and current_offer_val >= self.abs_min_acceptable * 0.95:
+                return None
+
+            # Accept if offer is near best received after 70% of negotiation
             progress = self.offers_made / self.total_offers
-            if progress >= 0.5 and current_offer_val >= self.best_offer_val * 0.95:
+            if progress >= 0.7 and current_offer_val >= self.best_offer_val * 0.98:
                 return None
 
         # Calculate adjusted desired value for counteroffer
@@ -74,18 +79,18 @@ class Agent:
         opponent_stubborn = len(self.opponent_offers) >=3 and \
                             all(x == self.opponent_offers[-1] for x in self.opponent_offers[-3:])
 
-        # Adjust concede speed: concede faster if opponent is stubborn, slower if they are conceding
+        # Adjust concede speed
         if opponent_stubborn:
             concede_speed = 0.35
         elif offers_decreasing:
             concede_speed = 0.2
         elif opponent_conceding:
-            concede_speed = 0.15
+            concede_speed = 0.1  # Concede much slower if opponent is giving more
         else:
             concede_speed = 0.25
 
-        desired_val = self.total_value * (0.7 - concede_speed * progress)
-        desired_val = max(desired_val, self.abs_min_acceptable, self.best_offer_val * 0.95)
+        desired_val = self.total_value * (0.8 - concede_speed * progress)
+        desired_val = max(desired_val, self.abs_min_acceptable, self.best_offer_val * 0.98)
         desired_val = min(desired_val, self.min_desired)
         self.min_desired = desired_val
 
@@ -93,18 +98,18 @@ class Agent:
         if o is not None and current_offer_val >= desired_val:
             return None
 
-        # If we are making final offer, lower target slightly to increase acceptance chance
+        # If we are making final offer, only slightly lower target (opponent gets zero if they reject)
         if offers_left <= 1 and self.me == self.last_offerer:
-            desired_val = max(self.abs_min_acceptable * 0.8, desired_val * 0.9)
+            desired_val = max(self.abs_min_acceptable * 0.9, desired_val * 0.95)
 
-        # Calculate estimated opponent values (total equals ours per problem statement)
+        # Calculate estimated opponent values
         sum_ema = sum(self.opponent_kept_ema)
         opp_est_values = [0.0]*num_obj
         if sum_ema > 0:
             for i in range(num_obj):
                 opp_est_values[i] = (self.opponent_kept_ema[i] / sum_ema) * self.total_value / max(self.counts[i], 1)
 
-        # Build offer: prioritize items with highest (our value / opponent value) ratio (win-win)
+        # Build offer: prioritize win-win items (high our value / opponent value ratio)
         def priority(idx):
             if sum_ema == 0:
                 return (-self.values[idx], -self.counts[idx])
@@ -131,11 +136,11 @@ class Agent:
                 current_val += add * self.values[idx]
                 if current_val >= desired_val: break
 
-        # Give away low-value items opponent wants to improve acceptance
+        # Give away very low-value items opponent wants to improve acceptance chance
         sorted_opponent_pref = sorted(range(num_obj), key=lambda x: (-opp_est_values[x], -self.counts[x]))
         for idx in sorted_opponent_pref:
             if my_offer[idx] == 0 or self.values[idx] == 0: continue
-            if current_val > desired_val * 0.98 and self.values[idx] <= 0.06 * self.total_value:
+            if current_val > desired_val * 0.98 and self.values[idx] <= 0.04 * self.total_value:
                 give = min(my_offer[idx], 1)
                 my_offer[idx] -= give
                 current_val -= give * self.values[idx]
@@ -147,15 +152,15 @@ class Agent:
             if self.values[i] == 0:
                 my_offer[i] = 0
 
-        # Avoid repeating same offer multiple times, make concession
+        # Avoid repeating same offer multiple times, make small concession
         repeat_count = sum(1 for x in self.my_previous_offers if x == my_offer)
         if repeat_count >= 1:
             for idx in reversed(sorted_priority):
-                if my_offer[idx] > 0 and self.values[idx] <= 0.08 * self.total_value:
+                if my_offer[idx] > 0 and self.values[idx] <= 0.05 * self.total_value:
                     give = min(my_offer[idx], 1)
                     my_offer[idx] -= give
                     current_val -= give * self.values[idx]
-                    self.min_desired = max(self.abs_min_acceptable, self.min_desired * 0.96)
+                    self.min_desired = max(self.abs_min_acceptable, self.min_desired * 0.97)
                     break
 
         # Validate offer

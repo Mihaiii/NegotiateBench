@@ -17,7 +17,7 @@ if __name__ == "__main__":
     except:
         sleep_seconds = 3600
 
-    while True:
+    while os.getenv("DISABLE_JOB", "false").lower() != "true":
         start = time.time()
 
         job.main()

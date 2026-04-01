@@ -1,6 +1,5 @@
-supabase==v2.27.0
-python-fasthtml==0.12.36
-starlette<0.46.0
+supabase==2.27.0
+python-fasthtml==0.13.2
 python-dotenv
 psycopg2-binary
 GitPython

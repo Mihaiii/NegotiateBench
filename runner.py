@@ -20,7 +20,8 @@ if __name__ == "__main__":
     while True:
         start = time.time()
 
-        job.main()
+        if os.getenv("DISABLE_JOB", "false").lower() != "true":
+            job.main()
 
         elapsed = time.time() - start
         remaining = max(0, sleep_seconds - elapsed)
